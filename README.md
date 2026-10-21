@@ -1,6 +1,6 @@
 # Google Ads MCP Server
 
-Servidor MCP (Model Context Protocol) que lê e edita contas do Google Ads pela Google Ads API REST (`v25`). As ferramentas de leitura têm os mesmos parâmetros do [googleads/google-ads-mcp](https://github.com/googleads/google-ads-mcp). As ferramentas de edição alteram status, orçamento, lances, estratégia de lance e palavras-chave, sempre com uma prévia antes da alteração real.
+Servidor MCP (Model Context Protocol) que lê e edita contas do Google Ads pela Google Ads API REST (`v25`). As ferramentas de leitura têm os mesmos parâmetros do [googleads/google-ads-mcp](https://github.com/googleads/google-ads-mcp). As ferramentas de edição alteram status, orçamento, lances, estratégia de lance, palavras-chave, locais, programação de horários e URL final dos anúncios, e clonam campanhas de pesquisa, sempre com uma prévia antes da alteração real.
 
 ## Ferramentas expostas
 
@@ -21,9 +21,13 @@ Servidor MCP (Model Context Protocol) que lê e edita contas do Google Ads pela 
 | `set_bid` | Altera o CPC máximo de um grupo de anúncios ou de uma palavra-chave (`keyword_id`). |
 | `set_bidding_strategy` | Troca a estratégia de lance padrão (`MANUAL_CPC`, `MAXIMIZE_CLICKS`, `MAXIMIZE_CONVERSIONS`, `MAXIMIZE_CONVERSION_VALUE`) e define a meta de CPA (`target_cpa`) ou de ROAS (`target_roas`). Recusa estratégia de portfólio. |
 | `add_keywords` | Adiciona palavras-chave a um grupo de anúncios (`ad_group_id`), palavras-chave negativas a uma campanha (`campaign_id`) ou palavras-chave a uma lista de palavras-chave negativas (`list_id`). |
-| `remove_keyword` | Remove uma palavra-chave pelo `resource_name` que o `search` retorna (`adGroupCriteria`, `campaignCriteria` ou `sharedCriteria`). |
+| `remove_keywords` | Remove palavras-chave pelos `resource_names` que o `search` retorna (`adGroupCriteria`, `campaignCriteria` ou `sharedCriteria`), numa única chamada. |
 | `create_negative_keyword_list` | Cria uma lista de palavras-chave negativas com as palavras iniciais, numa única chamada. |
 | `link_negative_keyword_list` | Vincula uma lista de palavras-chave negativas a campanhas ou, com `unlink=true`, desvincula. |
+| `clone_campaign` | Cria uma cópia pausada de uma campanha de pesquisa, numa única chamada. Ver [Clonar uma campanha](#clonar-uma-campanha). |
+| `set_locations` | Substitui os locais segmentados de uma campanha por raios (`points`) e/ou IDs de local do Google (`location_ids`). Os locais excluídos (negativos) não mudam. |
+| `set_ad_schedule` | Substitui a programação de horários de uma campanha, em horas inteiras no fuso da conta. Uma lista vazia remove a programação. |
+| `set_ad_final_url` | Altera a URL final de um anúncio (`ad_id`). |
 
 As ferramentas de leitura são anotadas com `readOnlyHint=true`. As ferramentas de edição são anotadas com `readOnlyHint=false` e `destructiveHint=true`. Com essas anotações, o Claude Code pede permissão a cada chamada de edição. Não inclua as ferramentas de edição na allowlist de permissões.
 
@@ -60,7 +64,30 @@ Regras aplicadas pelas ferramentas:
 - `set_bid` retorna um aviso quando a estratégia da campanha não é `MANUAL_CPC`, porque o Google ignora o CPC máximo nas outras estratégias.
 - `set_bidding_strategy` sem meta remove a meta existente. A prévia mostra a meta como `null` em `after`. A troca de estratégia ou de meta reinicia o período de aprendizado da campanha, e a prévia registra esse aviso.
 - O Google rejeita estratégias que o tipo de campanha não aceita. A prévia mostra o erro do Google antes de qualquer alteração.
+- `set_ad_schedule` descarta os ajustes de lance da programação atual e registra esse aviso.
 - Erros da API retornam a mensagem do Google e o `Request ID`.
+
+### Clonar uma campanha
+
+`clone_campaign` copia uma campanha de pesquisa para uma campanha nova, criada com status `PAUSED`. A ferramenta copia:
+
+- o orçamento, como um orçamento novo não compartilhado;
+- a estratégia de lance e a meta, as redes, a opção de local e as configurações de rastreamento;
+- idiomas, locais, raios, programação de horários e palavras-chave negativas da campanha;
+- os recursos vinculados à campanha (imagens, logotipo, sitelinks) e as listas de palavras-chave negativas vinculadas;
+- os grupos de anúncios, com as palavras-chave e os anúncios responsivos de pesquisa. O nome da campanha de origem é substituído pelo nome novo nos nomes dos grupos.
+
+A ferramenta não copia ajustes de lance por dispositivo, públicos, recursos de grupo de anúncios e anúncios de outros tipos. Cada anúncio ignorado aparece em `warnings`. A ferramenta recusa campanhas que não são de pesquisa e campanhas com estratégia de portfólio.
+
+Para abrir a mesma campanha em outra cidade:
+
+1. Clone a campanha com `clone_campaign`.
+2. Troque os locais com `set_locations`.
+3. Ajuste os horários ao fuso da cidade com `set_ad_schedule`.
+4. Troque a URL final dos anúncios com `set_ad_final_url`.
+5. Troque as palavras-chave com nome de cidade com `remove_keywords` e `add_keywords`.
+6. Ajuste orçamento e meta com `set_campaign_budget` e `set_bidding_strategy`.
+7. Ative a campanha com `set_status`.
 
 ## Pré-requisitos
 
@@ -261,3 +288,4 @@ A versão da API fica na constante `API_VERSION` em `google_ads_mcp/api.py`. O G
 - "Troque a estratégia da campanha X para maximizar conversões com CPA desejado de R$ 25."
 - "Adicione 'grátis' e 'emprego' como negativas de frase na campanha X."
 - "Crie uma lista de negativas chamada 'Geral' com estas palavras e vincule às campanhas de pesquisa da conta Y."
+- "Clone a campanha X para Houston, com raio de 20 km no centro da cidade."

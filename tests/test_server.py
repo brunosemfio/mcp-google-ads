@@ -467,26 +467,53 @@ def test_add_keywords_rules(ads):
         ("sharedCriteria", "sharedCriterion", "sharedCriterionOperation"),
     ],
 )
-def test_remove_keyword(ads, kind, resource, operation):
+def test_remove_keywords(ads, kind, resource, operation):
     name = f"customers/{CID}/{kind}/5~9"
-    ads["rows"]["FROM"] = [{resource: {"keyword": {"text": "k", "matchType": "EXACT"}}}]
-    result = _tool("remove_keyword")(CID, name)
+    keyword = {"text": "k", "matchType": "EXACT"}
+    ads["rows"]["FROM"] = [{resource: {"resourceName": name, "keyword": keyword}}]
+    result = _tool("remove_keywords")(CID, [name, name])
     assert ads["mutations"][0]["operations"] == [{operation: {"remove": name}}]
-    assert f"resource_name = '{name}'" in ads["queries"][0]
-    assert result["before"] == {"text": "k", "match_type": "EXACT"}
+    assert f"resource_name IN ('{name}')" in ads["queries"][0]
+    assert result["before"] == [{"resource_name": name, "text": "k", "match_type": "EXACT"}]
     assert result["after"] is None
 
 
-def test_remove_keyword_rules(ads):
+def test_remove_keywords_mixes_kinds_in_one_call(ads):
+    group = f"customers/{CID}/adGroupCriteria/5~9"
+    shared = f"customers/{CID}/sharedCriteria/3~4"
+    keyword = {"text": "k", "matchType": "EXACT"}
+    ads["rows"]["FROM ad_group_criterion"] = [
+        {"adGroupCriterion": {"resourceName": group, "keyword": keyword}}
+    ]
+    ads["rows"]["FROM shared_criterion"] = [
+        {"sharedCriterion": {"resourceName": shared, "keyword": keyword}}
+    ]
+    _tool("remove_keywords")(CID, [group, shared])
+    assert ads["mutations"] == [
+        {
+            "customer_id": CID,
+            "operations": [
+                {"adGroupCriterionOperation": {"remove": group}},
+                {"sharedCriterionOperation": {"remove": shared}},
+            ],
+            "validate_only": True,
+        }
+    ]
+
+
+def test_remove_keywords_rules(ads):
     for name in (
         "customers/999/adGroupCriteria/5~9",
         f"customers/{CID}/campaigns/5",
         f"customers/{CID}/adGroupCriteria/5~9' OR '1'='1",
     ):
         with pytest.raises(ValueError, match="Invalid keyword resource_name"):
-            _tool("remove_keyword")(CID, name)
+            _tool("remove_keywords")(CID, [name])
+    with pytest.raises(ValueError, match="empty"):
+        _tool("remove_keywords")(CID, [])
     with pytest.raises(ValueError, match="not found"):
-        _tool("remove_keyword")(CID, f"customers/{CID}/adGroupCriteria/5~9")
+        _tool("remove_keywords")(CID, [f"customers/{CID}/adGroupCriteria/5~9"])
+    assert not ads["mutations"]
 
 
 def test_create_negative_keyword_list(ads):
@@ -564,10 +591,401 @@ def test_tool_annotations():
 
     tools = {tool.name: tool.annotations for tool in asyncio.run(list_tools())}
     read = {"list_accessible_customers", "search", "get_resource_metadata"}
-    assert len(tools) == 11
+    assert len(tools) == 15
     for name, annotations in tools.items():
         if name in read:
             assert annotations.readOnlyHint is True
         else:
             assert annotations.readOnlyHint is False
             assert annotations.destructiveHint is True
+
+
+def _clone_rows(ads, **campaign):
+    ads["rows"]["FROM campaign WHERE"] = [
+        {
+            "customer": {"currencyCode": "USD"},
+            "campaign": {
+                "name": "LA - Rent",
+                "advertisingChannelType": "SEARCH",
+                "biddingStrategyType": "MAXIMIZE_CONVERSIONS",
+                "maximizeConversions": {"targetCpaMicros": "53000000"},
+                "networkSettings": {"targetGoogleSearch": True, "targetSearchNetwork": False},
+                "geoTargetTypeSetting": {"positiveGeoTargetType": "PRESENCE_OR_INTEREST"},
+                **campaign,
+            },
+            "campaignBudget": {"amountMicros": "160000000", "deliveryMethod": "STANDARD"},
+        }
+    ]
+    ads["rows"]["FROM campaign_criterion"] = [
+        {
+            "campaignCriterion": {
+                "type": "LANGUAGE",
+                "negative": False,
+                "language": {"languageConstant": "languageConstants/1000"},
+            }
+        },
+        {
+            "campaignCriterion": {
+                "type": "PROXIMITY",
+                "negative": False,
+                "proximity": {"geoPoint": {"latitudeInMicroDegrees": 1}, "radius": 20},
+            }
+        },
+    ]
+    ads["rows"]["FROM campaign_asset"] = [
+        {"campaignAsset": {"asset": "customers/1/assets/9", "fieldType": "AD_IMAGE"}}
+    ]
+    ads["rows"]["FROM campaign_shared_set"] = [
+        {"campaignSharedSet": {"sharedSet": "customers/1/sharedSets/3"}}
+    ]
+    ads["rows"]["FROM ad_group WHERE"] = [
+        {
+            "adGroup": {
+                "id": "5",
+                "name": "LA - Rent",
+                "status": "ENABLED",
+                "type": "SEARCH_STANDARD",
+            }
+        }
+    ]
+    ads["rows"]["FROM ad_group_criterion"] = [
+        {
+            "adGroup": {"id": "5"},
+            "adGroupCriterion": {
+                "status": "ENABLED",
+                "negative": False,
+                "keyword": {"text": "photo booth", "matchType": "BROAD"},
+            },
+        }
+    ]
+    headline = {"text": "H", "pinnedField": "HEADLINE_1", "assetPerformanceLabel": "GOOD"}
+    ads["rows"]["FROM ad_group_ad"] = [
+        {
+            "adGroup": {"id": "5"},
+            "adGroupAd": {
+                "status": "ENABLED",
+                "ad": {
+                    "type": "RESPONSIVE_SEARCH_AD",
+                    "finalUrls": ["https://x.com/la"],
+                    "responsiveSearchAd": {
+                        "headlines": [headline],
+                        "descriptions": [{"text": "D", "policySummaryInfo": {}}],
+                        "path1": "Photo",
+                    },
+                },
+            },
+        },
+        {"adGroup": {"id": "5"}, "adGroupAd": {"status": "ENABLED", "ad": {"type": "IMAGE_AD"}}},
+    ]
+
+
+def test_clone_campaign(ads):
+    _clone_rows(ads)
+    result = _tool("clone_campaign")(CID, "7", " HOU - Rent ")
+    budget = f"customers/{CID}/campaignBudgets/-1"
+    campaign = f"customers/{CID}/campaigns/-2"
+    group = f"customers/{CID}/adGroups/-3"
+    assert ads["mutations"][0]["operations"] == [
+        {
+            "campaignBudgetOperation": {
+                "create": {
+                    "resourceName": budget,
+                    "name": "HOU - Rent",
+                    "explicitlyShared": False,
+                    "amountMicros": "160000000",
+                    "deliveryMethod": "STANDARD",
+                }
+            }
+        },
+        {
+            "campaignOperation": {
+                "create": {
+                    "resourceName": campaign,
+                    "name": "HOU - Rent",
+                    "status": "PAUSED",
+                    "advertisingChannelType": "SEARCH",
+                    "campaignBudget": budget,
+                    "containsEuPoliticalAdvertising": "DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING",
+                    "maximizeConversions": {"targetCpaMicros": "53000000"},
+                    "networkSettings": {"targetGoogleSearch": True, "targetSearchNetwork": False},
+                    "geoTargetTypeSetting": {"positiveGeoTargetType": "PRESENCE_OR_INTEREST"},
+                }
+            }
+        },
+        {
+            "campaignCriterionOperation": {
+                "create": {
+                    "campaign": campaign,
+                    "language": {"languageConstant": "languageConstants/1000"},
+                    "negative": False,
+                }
+            }
+        },
+        {
+            "campaignCriterionOperation": {
+                "create": {
+                    "campaign": campaign,
+                    "proximity": {"geoPoint": {"latitudeInMicroDegrees": 1}, "radius": 20},
+                    "negative": False,
+                }
+            }
+        },
+        {
+            "campaignAssetOperation": {
+                "create": {
+                    "campaign": campaign,
+                    "asset": "customers/1/assets/9",
+                    "fieldType": "AD_IMAGE",
+                }
+            }
+        },
+        {
+            "campaignSharedSetOperation": {
+                "create": {"campaign": campaign, "sharedSet": "customers/1/sharedSets/3"}
+            }
+        },
+        {
+            "adGroupOperation": {
+                "create": {
+                    "resourceName": group,
+                    "campaign": campaign,
+                    "name": "HOU - Rent",
+                    "status": "ENABLED",
+                    "type": "SEARCH_STANDARD",
+                }
+            }
+        },
+        {
+            "adGroupCriterionOperation": {
+                "create": {
+                    "adGroup": group,
+                    "status": "ENABLED",
+                    "negative": False,
+                    "keyword": {"text": "photo booth", "matchType": "BROAD"},
+                }
+            }
+        },
+        {
+            "adGroupAdOperation": {
+                "create": {
+                    "adGroup": group,
+                    "status": "ENABLED",
+                    "ad": {
+                        "finalUrls": ["https://x.com/la"],
+                        "responsiveSearchAd": {
+                            "headlines": [{"text": "H", "pinnedField": "HEADLINE_1"}],
+                            "descriptions": [{"text": "D"}],
+                            "path1": "Photo",
+                        },
+                    },
+                }
+            }
+        },
+    ]
+    assert result["after"] == {
+        "source": "LA - Rent",
+        "name": "HOU - Rent",
+        "status": "PAUSED",
+        "daily_budget": 160.0,
+        "strategy": "MAXIMIZE_CONVERSIONS",
+        "target_cpa": 53.0,
+        "target_roas": None,
+        "criteria": {"LANGUAGE": 1, "PROXIMITY": 1},
+        "campaign_assets": 1,
+        "negative_keyword_lists": 1,
+        "ad_groups": [{"name": "HOU - Rent", "keywords": 1, "ads": 1}],
+    }
+    assert result["currency"] == "USD"
+    assert result["warnings"] == ["Skipped IMAGE_AD ad in ad group 'LA - Rent'."]
+
+
+@pytest.mark.parametrize(
+    "campaign, message",
+    [
+        ({"advertisingChannelType": "PERFORMANCE_MAX"}, "search campaigns"),
+        ({"biddingStrategy": "customers/1/biddingStrategies/2"}, "portfolio"),
+        ({"biddingStrategyType": "TARGET_IMPRESSION_SHARE"}, "not supported"),
+    ],
+)
+def test_clone_campaign_refusals(ads, campaign, message):
+    _clone_rows(ads, **campaign)
+    with pytest.raises(ValueError, match=message):
+        _tool("clone_campaign")(CID, "7", "HOU - Rent")
+    with pytest.raises(ValueError, match="name"):
+        _tool("clone_campaign")(CID, "7", " ")
+    assert not ads["mutations"]
+
+
+def test_set_locations(ads):
+    ads["rows"]["FROM campaign WHERE"] = [{"campaign": {"name": "C"}}]
+    ads["rows"]["FROM campaign_criterion"] = [
+        {
+            "campaignCriterion": {
+                "resourceName": "rn/1",
+                "proximity": {
+                    "geoPoint": {"latitudeInMicroDegrees": 34054908, "longitudeInMicroDegrees": -1},
+                    "radius": 20,
+                    "radiusUnits": "KILOMETERS",
+                },
+            }
+        },
+        {"campaignCriterion": {"resourceName": "rn/2", "location": {"geoTargetConstant": "g/1"}}},
+    ]
+    result = _tool("set_locations")(
+        CID,
+        "7",
+        points=[{"latitude": 29.7604, "longitude": -95.3698, "radius": 20}],
+        location_ids=["1026339"],
+    )
+    campaign = f"customers/{CID}/campaigns/7"
+    assert ads["mutations"][0]["operations"] == [
+        {"campaignCriterionOperation": {"remove": "rn/1"}},
+        {"campaignCriterionOperation": {"remove": "rn/2"}},
+        {
+            "campaignCriterionOperation": {
+                "create": {
+                    "campaign": campaign,
+                    "proximity": {
+                        "geoPoint": {
+                            "latitudeInMicroDegrees": 29760400,
+                            "longitudeInMicroDegrees": -95369800,
+                        },
+                        "radius": 20.0,
+                        "radiusUnits": "KILOMETERS",
+                    },
+                }
+            }
+        },
+        {
+            "campaignCriterionOperation": {
+                "create": {
+                    "campaign": campaign,
+                    "location": {"geoTargetConstant": "geoTargetConstants/1026339"},
+                }
+            }
+        },
+    ]
+    assert "negative = FALSE" in ads["queries"][1]
+    assert result["before"]["locations"] == [
+        {"latitude": 34.054908, "longitude": -0.000001, "radius": 20, "units": "KILOMETERS"},
+        {"location": "g/1"},
+    ]
+    assert result["after"]["locations"] == [
+        {"latitude": 29.7604, "longitude": -95.3698, "radius": 20.0, "units": "KILOMETERS"},
+        {"location": "geoTargetConstants/1026339"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({}, "points and/or location_ids"),
+        ({"points": [{"latitude": 100, "longitude": 0, "radius": 5}]}, "Invalid point"),
+        ({"points": [{"latitude": 1, "longitude": 1, "radius": 0}]}, "Invalid point"),
+        ({"points": [{"latitude": 1, "radius": 5}]}, "Invalid point"),
+        ({"points": [{"latitude": 1, "longitude": 1, "radius": 5, "units": "FEET"}]}, "units"),
+        ({"location_ids": ["Houston"]}, "location_id"),
+    ],
+)
+def test_set_locations_rules(ads, kwargs, message):
+    ads["rows"]["FROM campaign WHERE"] = [{"campaign": {"name": "C"}}]
+    with pytest.raises(ValueError, match=message):
+        _tool("set_locations")(CID, "7", **kwargs)
+    assert not ads["mutations"]
+
+
+def test_set_ad_schedule(ads):
+    ads["rows"]["FROM campaign WHERE"] = [
+        {"campaign": {"name": "C"}, "customer": {"timeZone": "America/New_York"}}
+    ]
+    ads["rows"]["FROM campaign_criterion"] = [
+        {
+            "campaignCriterion": {
+                "resourceName": "rn/1",
+                "bidModifier": 1.2,
+                "adSchedule": {"dayOfWeek": "MONDAY", "startHour": 3, "endHour": 21},
+            }
+        }
+    ]
+    result = _tool("set_ad_schedule")(
+        CID, "7", [{"day": "monday", "start_hour": 5, "end_hour": 23}]
+    )
+    assert ads["mutations"][0]["operations"] == [
+        {"campaignCriterionOperation": {"remove": "rn/1"}},
+        {
+            "campaignCriterionOperation": {
+                "create": {
+                    "campaign": f"customers/{CID}/campaigns/7",
+                    "adSchedule": {
+                        "dayOfWeek": "MONDAY",
+                        "startHour": 5,
+                        "startMinute": "ZERO",
+                        "endHour": 23,
+                        "endMinute": "ZERO",
+                    },
+                }
+            }
+        },
+    ]
+    assert result["before"] == {
+        "campaign": "C",
+        "time_zone": "America/New_York",
+        "schedule": [{"day": "MONDAY", "start_hour": 3, "end_hour": 21}],
+    }
+    assert result["after"]["schedule"] == [{"day": "MONDAY", "start_hour": 5, "end_hour": 23}]
+    assert "Bid adjustments" in result["warnings"][0]
+
+
+def test_set_ad_schedule_empty_removes_schedule(ads):
+    ads["rows"]["FROM campaign WHERE"] = [{"campaign": {"name": "C"}}]
+    ads["rows"]["FROM campaign_criterion"] = [{"campaignCriterion": {"resourceName": "rn/1"}}]
+    result = _tool("set_ad_schedule")(CID, "7", [])
+    assert ads["mutations"][0]["operations"] == [{"campaignCriterionOperation": {"remove": "rn/1"}}]
+    assert result["after"]["schedule"] == []
+
+
+def test_set_ad_schedule_rules(ads):
+    for entry in (
+        {"day": "MONDAYS", "start_hour": 5, "end_hour": 23},
+        {"day": "MONDAY", "start_hour": 23, "end_hour": 5},
+        {"day": "MONDAY", "start_hour": 5, "end_hour": 25},
+        {"day": "MONDAY", "start_hour": 5.5, "end_hour": 23},
+    ):
+        with pytest.raises(ValueError, match="Invalid schedule entry"):
+            _tool("set_ad_schedule")(CID, "7", [entry])
+    ads["rows"]["FROM campaign WHERE"] = [{"campaign": {"name": "C"}}]
+    with pytest.raises(ValueError, match="no ad schedule"):
+        _tool("set_ad_schedule")(CID, "7", [])
+    assert not ads["mutations"]
+
+
+def test_set_ad_final_url(ads):
+    ads["rows"]["FROM ad_group_ad"] = [
+        {
+            "campaign": {"name": "C"},
+            "adGroup": {"name": "G"},
+            "adGroupAd": {"ad": {"finalUrls": ["https://x.com/la"]}},
+        }
+    ]
+    result = _tool("set_ad_final_url")(CID, "9", "https://x.com/houston")
+    assert ads["mutations"][0]["operations"] == [
+        {
+            "adOperation": {
+                "update": {
+                    "resourceName": f"customers/{CID}/ads/9",
+                    "finalUrls": ["https://x.com/houston"],
+                },
+                "updateMask": "final_urls",
+            }
+        }
+    ]
+    assert result["before"]["final_urls"] == ["https://x.com/la"]
+    assert result["after"]["final_urls"] == ["https://x.com/houston"]
+
+
+def test_set_ad_final_url_rules(ads):
+    with pytest.raises(ValueError, match="final_url"):
+        _tool("set_ad_final_url")(CID, "9", "x.com/houston")
+    with pytest.raises(ValueError, match="not found"):
+        _tool("set_ad_final_url")(CID, "9", "https://x.com/houston")
+    assert not ads["mutations"]

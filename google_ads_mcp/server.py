@@ -61,6 +61,23 @@ REMOVABLE = {
     "sharedCriteria": ("shared_criterion", "sharedCriterionOperation"),
 }
 
+SCHEMES = {
+    "MANUAL_CPC": "manualCpc",
+    "TARGET_SPEND": "targetSpend",
+    "MAXIMIZE_CONVERSIONS": "maximizeConversions",
+    "MAXIMIZE_CONVERSION_VALUE": "maximizeConversionValue",
+}
+
+CLONED_CRITERIA = {
+    "LANGUAGE": "language",
+    "LOCATION": "location",
+    "PROXIMITY": "proximity",
+    "AD_SCHEDULE": "adSchedule",
+    "KEYWORD": "keyword",
+}
+
+DAYS = ("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY")
+
 
 def _cid(customer_id: str | int) -> str:
     cid = api.digits(customer_id)
@@ -570,15 +587,15 @@ def add_keywords(
 
 
 @mcp.tool(annotations=WRITE)
-def remove_keyword(
+def remove_keywords(
     customer_id: str | int,
-    resource_name: str,
+    resource_names: list[str],
     confirm: bool = False,
 ) -> dict[str, Any]:
-    """Permanently remove a keyword from an ad group, a campaign (negative) or a negative
-    keyword list.
+    """Permanently remove keywords from ad groups, campaigns (negatives) or negative keyword
+    lists, in one all-or-nothing call.
 
-    resource_name is the keyword's resource name as returned by `search`, e.g.
+    resource_names are the keywords' resource names as returned by `search`, e.g.
     customers/123/adGroupCriteria/456~789 (ad_group_criterion.resource_name),
     customers/123/campaignCriteria/456~789 (campaign_criterion.resource_name) or
     customers/123/sharedCriteria/456~789 (shared_criterion.resource_name). With confirm=false
@@ -586,28 +603,48 @@ def remove_keyword(
     confirm=true only after the user explicitly approves the preview.
     """
     cid = _cid(customer_id)
-    match = re.fullmatch(
-        r"customers/(\d+)/(adGroupCriteria|campaignCriteria|sharedCriteria)/\d+~\d+", resource_name
-    )
-    if not match or match.group(1) != cid:
-        raise ValueError(f"Invalid keyword resource_name {resource_name!r} for account {cid}.")
-    resource, operation = REMOVABLE[match.group(2)]
-    row = _query_one(
-        cid,
-        f"SELECT {resource}.keyword.text, {resource}.keyword.match_type FROM {resource} "
-        f"WHERE {resource}.resource_name = '{resource_name}' AND {resource}.type = 'KEYWORD'",
-        "keyword",
-    )
+    if not resource_names:
+        raise ValueError("resource_names must not be empty.")
+    by_kind: dict[str, list[str]] = {}
+    for name in dict.fromkeys(resource_names):
+        match = re.fullmatch(
+            r"customers/(\d+)/(adGroupCriteria|campaignCriteria|sharedCriteria)/\d+~\d+", name
+        )
+        if not match or match.group(1) != cid:
+            raise ValueError(f"Invalid keyword resource_name {name!r} for account {cid}.")
+        by_kind.setdefault(match.group(2), []).append(name)
+    removed, operations = [], []
+    for kind, names in by_kind.items():
+        resource, operation = REMOVABLE[kind]
+        quoted = ", ".join(f"'{name}'" for name in names)
+        rows = {
+            _field(row, f"{resource}.resource_name"): row
+            for row in api.search_stream(
+                cid,
+                f"SELECT {resource}.resource_name, {resource}.keyword.text, "
+                f"{resource}.keyword.match_type FROM {resource} "
+                f"WHERE {resource}.resource_name IN ({quoted}) AND {resource}.type = 'KEYWORD'",
+            )
+        }
+        missing = [name for name in names if name not in rows]
+        if missing:
+            raise ValueError(f"Keywords not found in account {cid}: {', '.join(missing)}.")
+        for name in names:
+            removed.append(
+                {
+                    "resource_name": name,
+                    "text": _field(rows[name], f"{resource}.keyword.text"),
+                    "match_type": _field(rows[name], f"{resource}.keyword.match_type"),
+                }
+            )
+            operations.append({operation: {"remove": name}})
     return _write(
         cid,
-        [{operation: {"remove": resource_name}}],
+        operations,
         confirm,
-        before={
-            "text": _field(row, f"{resource}.keyword.text"),
-            "match_type": _field(row, f"{resource}.keyword.match_type"),
-        },
+        before=removed,
         after=None,
-        warnings=["The keyword will be permanently removed."],
+        warnings=[f"{len(removed)} keyword(s) will be permanently removed."],
     )
 
 
@@ -742,6 +779,505 @@ def link_negative_keyword_list(
         before={"list": list_name, "linked": [names[c] for c in ids if c in linked]},
         after={"list": list_name, "linked": [] if unlink else [names[c] for c in ids]},
         warnings=warnings,
+    )
+
+
+def _pick(source: dict[str, Any], *keys: str) -> dict[str, Any]:
+    return {key: source[key] for key in keys if key in source}
+
+
+@mcp.tool(annotations=WRITE)
+def clone_campaign(
+    customer_id: str | int,
+    source_campaign_id: str | int,
+    name: str,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Create a paused copy of a search campaign, in one atomic call.
+
+    Copies the budget (as a new non-shared budget), bidding strategy and target, networks,
+    location option, tracking settings, languages, locations, radius targets, ad schedule,
+    campaign negative keywords, campaign assets (images, logo, sitelinks...), linked negative
+    keyword lists, and every ad group with its keywords and responsive search ads (ad group
+    names have the source campaign name replaced by the new name). Not copied:
+    device bid adjustments, audiences, ad group assets and other ad types (listed in warnings).
+    The new campaign is created PAUSED; adjust it with the other tools and enable it with
+    set_status. With confirm=true resource_names[1] is the new campaign. With confirm=false
+    (default) the creation is only validated and a preview is returned. Call again with
+    confirm=true only after the user explicitly approves the preview.
+    """
+    cid = _cid(customer_id)
+    source = _id(source_campaign_id, "source_campaign_id")
+    if not name.strip():
+        raise ValueError("name must not be empty.")
+    name = name.strip()
+    row = _query_one(
+        cid,
+        "SELECT campaign.name, campaign.advertising_channel_type, campaign.bidding_strategy, "
+        "campaign.bidding_strategy_type, campaign.maximize_conversions.target_cpa_micros, "
+        "campaign.maximize_conversion_value.target_roas, "
+        "campaign.target_spend.cpc_bid_ceiling_micros, "
+        "campaign.network_settings.target_google_search, "
+        "campaign.network_settings.target_search_network, "
+        "campaign.network_settings.target_content_network, "
+        "campaign.network_settings.target_partner_search_network, "
+        "campaign.geo_target_type_setting.positive_geo_target_type, "
+        "campaign.geo_target_type_setting.negative_geo_target_type, "
+        "campaign.tracking_url_template, campaign.final_url_suffix, "
+        "campaign_budget.amount_micros, campaign_budget.delivery_method, "
+        f"customer.currency_code FROM campaign WHERE campaign.id = {source}",
+        "campaign",
+    )
+    campaign = row["campaign"]
+    if campaign.get("advertisingChannelType") != "SEARCH":
+        raise ValueError("Only search campaigns can be cloned.")
+    if campaign.get("biddingStrategy"):
+        raise ValueError("The campaign uses a portfolio bidding strategy, which is not supported.")
+    strategy = campaign.get("biddingStrategyType")
+    if strategy not in SCHEMES:
+        raise ValueError(f"Bidding strategy {strategy} is not supported.")
+    scheme = SCHEMES[strategy]
+    budget_name = f"customers/{cid}/campaignBudgets/-1"
+    campaign_name = f"customers/{cid}/campaigns/-2"
+    operations: list[dict[str, Any]] = [
+        {
+            "campaignBudgetOperation": {
+                "create": {
+                    "resourceName": budget_name,
+                    "name": name,
+                    "explicitlyShared": False,
+                    **_pick(row["campaignBudget"], "amountMicros", "deliveryMethod"),
+                }
+            }
+        },
+        {
+            "campaignOperation": {
+                "create": {
+                    "resourceName": campaign_name,
+                    "name": name,
+                    "status": "PAUSED",
+                    "advertisingChannelType": "SEARCH",
+                    "campaignBudget": budget_name,
+                    "containsEuPoliticalAdvertising": "DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING",
+                    scheme: campaign.get(scheme, {}),
+                    **_pick(
+                        campaign,
+                        "networkSettings",
+                        "geoTargetTypeSetting",
+                        "trackingUrlTemplate",
+                        "finalUrlSuffix",
+                    ),
+                }
+            }
+        },
+    ]
+    criteria = api.search_stream(
+        cid,
+        "SELECT campaign_criterion.type, campaign_criterion.negative, "
+        "campaign_criterion.bid_modifier, campaign_criterion.language.language_constant, "
+        "campaign_criterion.location.geo_target_constant, "
+        "campaign_criterion.proximity.geo_point.latitude_in_micro_degrees, "
+        "campaign_criterion.proximity.geo_point.longitude_in_micro_degrees, "
+        "campaign_criterion.proximity.radius, campaign_criterion.proximity.radius_units, "
+        "campaign_criterion.ad_schedule.day_of_week, campaign_criterion.ad_schedule.start_hour, "
+        "campaign_criterion.ad_schedule.start_minute, campaign_criterion.ad_schedule.end_hour, "
+        "campaign_criterion.ad_schedule.end_minute, campaign_criterion.keyword.text, "
+        "campaign_criterion.keyword.match_type FROM campaign_criterion "
+        f"WHERE campaign.id = {source} AND campaign_criterion.status != 'REMOVED' "
+        f"AND campaign_criterion.type IN ({', '.join(CLONED_CRITERIA)})",
+    )
+    criteria_count: dict[str, int] = {}
+    for criterion in criteria:
+        data = criterion["campaignCriterion"]
+        field = CLONED_CRITERIA[data["type"]]
+        criteria_count[data["type"]] = criteria_count.get(data["type"], 0) + 1
+        operations.append(
+            {
+                "campaignCriterionOperation": {
+                    "create": {
+                        "campaign": campaign_name,
+                        field: data[field],
+                        **_pick(data, "negative", "bidModifier"),
+                    }
+                }
+            }
+        )
+    assets = api.search_stream(
+        cid,
+        "SELECT campaign.id, campaign_asset.asset, campaign_asset.field_type FROM campaign_asset "
+        f"WHERE campaign.id = {source} AND campaign_asset.status = 'ENABLED'",
+    )
+    operations += [
+        {
+            "campaignAssetOperation": {
+                "create": {
+                    "campaign": campaign_name,
+                    **_pick(asset["campaignAsset"], "asset", "fieldType"),
+                }
+            }
+        }
+        for asset in assets
+    ]
+    shared_sets = api.search_stream(
+        cid,
+        "SELECT campaign.id, campaign_shared_set.shared_set FROM campaign_shared_set "
+        f"WHERE campaign.id = {source} AND campaign_shared_set.status = 'ENABLED'",
+    )
+    operations += [
+        {
+            "campaignSharedSetOperation": {
+                "create": {
+                    "campaign": campaign_name,
+                    "sharedSet": shared_set["campaignSharedSet"]["sharedSet"],
+                }
+            }
+        }
+        for shared_set in shared_sets
+    ]
+    ad_groups = api.search_stream(
+        cid,
+        "SELECT ad_group.id, ad_group.name, ad_group.status, ad_group.type, "
+        f"ad_group.cpc_bid_micros FROM ad_group WHERE campaign.id = {source} "
+        "AND ad_group.status != 'REMOVED'",
+    )
+    keywords = api.search_stream(
+        cid,
+        "SELECT ad_group.id, ad_group_criterion.status, ad_group_criterion.negative, "
+        "ad_group_criterion.cpc_bid_micros, ad_group_criterion.keyword.text, "
+        "ad_group_criterion.keyword.match_type FROM ad_group_criterion "
+        f"WHERE campaign.id = {source} AND ad_group.status != 'REMOVED' "
+        "AND ad_group_criterion.status != 'REMOVED' AND ad_group_criterion.type = 'KEYWORD'",
+    )
+    ads = api.search_stream(
+        cid,
+        "SELECT ad_group.id, ad_group_ad.status, ad_group_ad.ad.type, ad_group_ad.ad.final_urls, "
+        "ad_group_ad.ad.responsive_search_ad.headlines, "
+        "ad_group_ad.ad.responsive_search_ad.descriptions, "
+        "ad_group_ad.ad.responsive_search_ad.path1, ad_group_ad.ad.responsive_search_ad.path2 "
+        f"FROM ad_group_ad WHERE campaign.id = {source} AND ad_group.status != 'REMOVED' "
+        "AND ad_group_ad.status != 'REMOVED'",
+    )
+    warnings = []
+    summary = []
+    for index, ad_group in enumerate(ad_groups):
+        source_group = ad_group["adGroup"]
+        group_name = f"customers/{cid}/adGroups/{-3 - index}"
+        new_group_name = source_group["name"].replace(campaign["name"], name)
+        operations.append(
+            {
+                "adGroupOperation": {
+                    "create": {
+                        "resourceName": group_name,
+                        "campaign": campaign_name,
+                        "name": new_group_name,
+                        **_pick(source_group, "status", "type", "cpcBidMicros"),
+                    }
+                }
+            }
+        )
+        group_keywords = [k for k in keywords if k["adGroup"]["id"] == source_group["id"]]
+        operations += [
+            {
+                "adGroupCriterionOperation": {
+                    "create": {
+                        "adGroup": group_name,
+                        **_pick(
+                            keyword["adGroupCriterion"],
+                            "status",
+                            "negative",
+                            "cpcBidMicros",
+                            "keyword",
+                        ),
+                    }
+                }
+            }
+            for keyword in group_keywords
+        ]
+        group_ads = [a for a in ads if a["adGroup"]["id"] == source_group["id"]]
+        copied_ads = 0
+        for ad_row in group_ads:
+            ad = ad_row["adGroupAd"]["ad"]
+            if ad.get("type") != "RESPONSIVE_SEARCH_AD":
+                warnings.append(
+                    f"Skipped {ad.get('type')} ad in ad group {source_group['name']!r}."
+                )
+                continue
+            rsa = ad["responsiveSearchAd"]
+            operations.append(
+                {
+                    "adGroupAdOperation": {
+                        "create": {
+                            "adGroup": group_name,
+                            "status": ad_row["adGroupAd"]["status"],
+                            "ad": {
+                                "finalUrls": ad["finalUrls"],
+                                "responsiveSearchAd": {
+                                    "headlines": [
+                                        _pick(h, "text", "pinnedField") for h in rsa["headlines"]
+                                    ],
+                                    "descriptions": [
+                                        _pick(d, "text", "pinnedField") for d in rsa["descriptions"]
+                                    ],
+                                    **_pick(rsa, "path1", "path2"),
+                                },
+                            },
+                        }
+                    }
+                }
+            )
+            copied_ads += 1
+        summary.append({"name": new_group_name, "keywords": len(group_keywords), "ads": copied_ads})
+    targets = campaign.get(scheme, {})
+    return _write(
+        cid,
+        operations,
+        confirm,
+        before=None,
+        after={
+            "source": campaign["name"],
+            "name": name,
+            "status": "PAUSED",
+            "daily_budget": _money(row["campaignBudget"].get("amountMicros")),
+            "strategy": "MAXIMIZE_CLICKS" if strategy == "TARGET_SPEND" else strategy,
+            "target_cpa": _money(targets.get("targetCpaMicros")),
+            "target_roas": targets.get("targetRoas"),
+            "criteria": criteria_count,
+            "campaign_assets": len(assets),
+            "negative_keyword_lists": len(shared_sets),
+            "ad_groups": summary,
+        },
+        currency=row["customer"]["currencyCode"],
+        warnings=warnings,
+    )
+
+
+def _point(point: dict[str, Any]) -> dict[str, Any]:
+    try:
+        latitude = Decimal(str(point["latitude"]))
+        longitude = Decimal(str(point["longitude"]))
+        radius = float(point["radius"])
+    except (KeyError, InvalidOperation, ValueError, TypeError) as exc:
+        raise ValueError(f"Invalid point {point!r}: needs latitude, longitude and radius.") from exc
+    units = str(point.get("units", "KILOMETERS")).upper()
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180 and radius > 0):
+        raise ValueError(f"Invalid point {point!r}.")
+    if units not in ("KILOMETERS", "MILES"):
+        raise ValueError(f"Invalid units {units!r}: use KILOMETERS or MILES.")
+    return {
+        "geoPoint": {
+            "latitudeInMicroDegrees": int(latitude * 1_000_000),
+            "longitudeInMicroDegrees": int(longitude * 1_000_000),
+        },
+        "radius": radius,
+        "radiusUnits": units,
+    }
+
+
+def _describe_location(criterion: dict[str, Any]) -> dict[str, Any]:
+    if "location" in criterion:
+        return {"location": criterion["location"]["geoTargetConstant"]}
+    proximity = criterion["proximity"]
+    point = proximity.get("geoPoint", {})
+    return {
+        "latitude": point.get("latitudeInMicroDegrees", 0) / 1_000_000,
+        "longitude": point.get("longitudeInMicroDegrees", 0) / 1_000_000,
+        "radius": proximity.get("radius"),
+        "units": proximity.get("radiusUnits"),
+    }
+
+
+@mcp.tool(annotations=WRITE)
+def set_locations(
+    customer_id: str | int,
+    campaign_id: str | int,
+    points: list[dict[str, Any]] | None = None,
+    location_ids: list[str | int] | None = None,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Replace a campaign's targeted locations (negative locations are kept).
+
+    points are radius targets: {"latitude": 29.7604, "longitude": -95.3698, "radius": 20,
+    "units": "KILOMETERS" | "MILES"} (units default to KILOMETERS). location_ids are Google
+    geo target ids, found with `search` on geo_target_constant (e.g. fields
+    geo_target_constant.id, geo_target_constant.canonical_name with condition
+    "geo_target_constant.name = 'Houston'"). All current targeted locations and radius targets
+    are removed and the new ones added in one call. With confirm=false (default) the change is
+    only validated and a preview is returned. Call again with confirm=true only after the user
+    explicitly approves the preview.
+    """
+    if not points and not location_ids:
+        raise ValueError("Pass points and/or location_ids.")
+    cid = _cid(customer_id)
+    campaign = _id(campaign_id, "campaign_id")
+    row = _query_one(
+        cid, f"SELECT campaign.name FROM campaign WHERE campaign.id = {campaign}", "campaign"
+    )
+    current = api.search_stream(
+        cid,
+        "SELECT campaign_criterion.resource_name, campaign_criterion.location.geo_target_constant, "
+        "campaign_criterion.proximity.geo_point.latitude_in_micro_degrees, "
+        "campaign_criterion.proximity.geo_point.longitude_in_micro_degrees, "
+        "campaign_criterion.proximity.radius, campaign_criterion.proximity.radius_units "
+        f"FROM campaign_criterion WHERE campaign.id = {campaign} "
+        "AND campaign_criterion.type IN (LOCATION, PROXIMITY) "
+        "AND campaign_criterion.negative = FALSE AND campaign_criterion.status != 'REMOVED'",
+    )
+    new = [{"proximity": _point(point)} for point in points or []]
+    new += [
+        {"location": {"geoTargetConstant": f"geoTargetConstants/{_id(location, 'location_id')}"}}
+        for location in location_ids or []
+    ]
+    operations = [
+        {"campaignCriterionOperation": {"remove": c["campaignCriterion"]["resourceName"]}}
+        for c in current
+    ]
+    operations += [
+        {
+            "campaignCriterionOperation": {
+                "create": {"campaign": f"customers/{cid}/campaigns/{campaign}", **criterion}
+            }
+        }
+        for criterion in new
+    ]
+    name = _field(row, "campaign.name")
+    return _write(
+        cid,
+        operations,
+        confirm,
+        before={
+            "campaign": name,
+            "locations": [_describe_location(c["campaignCriterion"]) for c in current],
+        },
+        after={"campaign": name, "locations": [_describe_location(c) for c in new]},
+    )
+
+
+@mcp.tool(annotations=WRITE)
+def set_ad_schedule(
+    customer_id: str | int,
+    campaign_id: str | int,
+    schedule: list[dict[str, Any]],
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Replace a campaign's ad schedule.
+
+    Each entry is {"day": "MONDAY".."SUNDAY", "start_hour": 5, "end_hour": 23}, with whole
+    hours from 0 to 24 (24 means midnight) in the account time zone (returned as time_zone).
+    An empty list removes the schedule, so ads run at all hours. Bid adjustments on the
+    current schedule are lost. With confirm=false (default) the change is only validated and
+    a preview is returned. Call again with confirm=true only after the user explicitly
+    approves the preview.
+    """
+    entries = []
+    for entry in schedule:
+        day = str(entry.get("day", "")).upper()
+        start, end = entry.get("start_hour"), entry.get("end_hour")
+        if (
+            day not in DAYS
+            or not isinstance(start, int)
+            or not isinstance(end, int)
+            or not 0 <= start < end <= 24
+        ):
+            raise ValueError(
+                f"Invalid schedule entry {entry!r}: needs day in {DAYS} and whole hours "
+                "with 0 <= start_hour < end_hour <= 24."
+            )
+        entries.append({"day": day, "start_hour": start, "end_hour": end})
+    cid = _cid(customer_id)
+    campaign = _id(campaign_id, "campaign_id")
+    row = _query_one(
+        cid,
+        f"SELECT campaign.name, customer.time_zone FROM campaign WHERE campaign.id = {campaign}",
+        "campaign",
+    )
+    current = api.search_stream(
+        cid,
+        "SELECT campaign_criterion.resource_name, campaign_criterion.bid_modifier, "
+        "campaign_criterion.ad_schedule.day_of_week, campaign_criterion.ad_schedule.start_hour, "
+        "campaign_criterion.ad_schedule.end_hour FROM campaign_criterion "
+        f"WHERE campaign.id = {campaign} AND campaign_criterion.type = AD_SCHEDULE "
+        "AND campaign_criterion.status != 'REMOVED'",
+    )
+    if not current and not entries:
+        raise ValueError("The campaign has no ad schedule to remove.")
+    warnings = []
+    if any("bidModifier" in c["campaignCriterion"] for c in current):
+        warnings.append("Bid adjustments on the current schedule will be lost.")
+    operations = [
+        {"campaignCriterionOperation": {"remove": c["campaignCriterion"]["resourceName"]}}
+        for c in current
+    ]
+    operations += [
+        {
+            "campaignCriterionOperation": {
+                "create": {
+                    "campaign": f"customers/{cid}/campaigns/{campaign}",
+                    "adSchedule": {
+                        "dayOfWeek": entry["day"],
+                        "startHour": entry["start_hour"],
+                        "startMinute": "ZERO",
+                        "endHour": entry["end_hour"],
+                        "endMinute": "ZERO",
+                    },
+                }
+            }
+        }
+        for entry in entries
+    ]
+    name = _field(row, "campaign.name")
+    time_zone = _field(row, "customer.time_zone")
+    before = [
+        {
+            "day": _field(c, "campaign_criterion.ad_schedule.day_of_week"),
+            "start_hour": _field(c, "campaign_criterion.ad_schedule.start_hour"),
+            "end_hour": _field(c, "campaign_criterion.ad_schedule.end_hour"),
+        }
+        for c in current
+    ]
+    return _write(
+        cid,
+        operations,
+        confirm,
+        before={"campaign": name, "time_zone": time_zone, "schedule": before},
+        after={"campaign": name, "time_zone": time_zone, "schedule": entries},
+        warnings=warnings,
+    )
+
+
+@mcp.tool(annotations=WRITE)
+def set_ad_final_url(
+    customer_id: str | int,
+    ad_id: str | int,
+    final_url: str,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Change the final URL (landing page) of an ad.
+
+    ad_id is ad_group_ad.ad.id. With confirm=false (default) the change is only validated
+    and a preview is returned. Call again with confirm=true only after the user explicitly
+    approves the preview.
+    """
+    if not re.fullmatch(r"https?://\S+", final_url):
+        raise ValueError(f"Invalid final_url {final_url!r}: must start with http:// or https://.")
+    cid = _cid(customer_id)
+    ad = _id(ad_id, "ad_id")
+    row = _query_one(
+        cid,
+        "SELECT campaign.name, ad_group.name, ad_group_ad.ad.final_urls FROM ad_group_ad "
+        f"WHERE ad_group_ad.ad.id = {ad} AND ad_group_ad.status != 'REMOVED'",
+        "ad",
+    )
+    context = {
+        "campaign": _field(row, "campaign.name"),
+        "ad_group": _field(row, "ad_group.name"),
+    }
+    update = {"resourceName": f"customers/{cid}/ads/{ad}", "finalUrls": [final_url]}
+    return _write(
+        cid,
+        [{"adOperation": {"update": update, "updateMask": "final_urls"}}],
+        confirm,
+        before={**context, "final_urls": _field(row, "ad_group_ad.ad.final_urls")},
+        after={**context, "final_urls": [final_url]},
     )
 
 

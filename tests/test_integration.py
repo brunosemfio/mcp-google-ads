@@ -219,10 +219,10 @@ def test_add_keywords_to_list(negative_list):
     _assert_preview(result)
 
 
-def test_remove_keyword(keyword):
-    result = _tool("remove_keyword")(CID, keyword["ad_group_criterion.resource_name"])
+def test_remove_keywords(keyword):
+    result = _tool("remove_keywords")(CID, [keyword["ad_group_criterion.resource_name"]])
     _assert_preview(result)
-    assert result["before"]["text"]
+    assert result["before"][0]["text"]
 
 
 def test_create_negative_keyword_list():
@@ -248,3 +248,31 @@ def test_link_and_unlink_negative_keyword_list(negative_list, campaign):
             assert "already" in str(exc)
             continue
         _assert_preview(result)
+
+
+def test_clone_campaign(campaign):
+    result = _tool("clone_campaign")(CID, campaign["campaign.id"], "mcp validate only test")
+    _assert_preview(result)
+    assert result["after"]["status"] == "PAUSED"
+    assert result["after"]["ad_groups"]
+
+
+def test_set_locations(campaign):
+    result = _tool("set_locations")(
+        CID,
+        campaign["campaign.id"],
+        points=[{"latitude": 29.7604, "longitude": -95.3698, "radius": 20}],
+    )
+    _assert_preview(result)
+
+
+def test_set_ad_schedule(campaign):
+    schedule = [{"day": day, "start_hour": 5, "end_hour": 23} for day in server.DAYS]
+    result = _tool("set_ad_schedule")(CID, campaign["campaign.id"], schedule)
+    _assert_preview(result)
+    assert result["after"]["time_zone"]
+
+
+def test_set_ad_final_url(ad):
+    result = _tool("set_ad_final_url")(CID, ad["ad_group_ad.ad.id"], "https://example.com/")
+    _assert_preview(result)
