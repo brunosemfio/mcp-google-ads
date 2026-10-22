@@ -172,7 +172,7 @@ No macOS, no Terminal:
 ```bash
 mkdir -p ~/.config/google-ads
 cat > ~/.config/google-ads/.env <<'ENV'
-GOOGLE_APPLICATION_CREDENTIALS=/Users/voce/.config/gcloud/application_default_credentials.json
+GOOGLE_ADS_CREDENTIALS=/Users/voce/.config/gcloud/application_default_credentials.json
 GOOGLE_ADS_DEVELOPER_TOKEN=SEU_DEVELOPER_TOKEN
 GOOGLE_ADS_LOGIN_CUSTOMER_ID=1234567890
 ENV
@@ -184,13 +184,15 @@ No Windows, no PowerShell:
 ```powershell
 New-Item -ItemType Directory -Force "$HOME\.config\google-ads" | Out-Null
 @"
-GOOGLE_APPLICATION_CREDENTIALS=C:\Users\voce\AppData\Roaming\gcloud\application_default_credentials.json
+GOOGLE_ADS_CREDENTIALS=C:\Users\voce\AppData\Roaming\gcloud\application_default_credentials.json
 GOOGLE_ADS_DEVELOPER_TOKEN=SEU_DEVELOPER_TOKEN
 GOOGLE_ADS_LOGIN_CUSTOMER_ID=1234567890
 "@ | Set-Content -Encoding utf8 "$HOME\.config\google-ads\.env"
 ```
 
-Variáveis já definidas no ambiente, inclusive pelo `--env` ou pelo `env` do cliente MCP, têm prioridade sobre o arquivo. O servidor lê o arquivo uma vez por processo, e a ausência do arquivo não é erro. O arquivo aceita `export ` no começo da linha, comentários com `#` e valores entre aspas. Escreva o caminho completo das credenciais: o servidor não expande o `~` em `GOOGLE_APPLICATION_CREDENTIALS`.
+Variáveis já definidas no ambiente, inclusive pelo `--env` ou pelo `env` do cliente MCP, têm prioridade sobre o arquivo. O servidor lê o arquivo uma vez por processo, e a ausência do arquivo não é erro. O arquivo aceita `export ` no começo da linha, comentários com `#` e valores entre aspas. Escreva o caminho completo das credenciais: o servidor não expande o `~`.
+
+No arquivo, use `GOOGLE_ADS_CREDENTIALS` em vez de `GOOGLE_APPLICATION_CREDENTIALS`. O servidor carrega as credenciais desse caminho, e um `GOOGLE_APPLICATION_CREDENTIALS` herdado do ambiente, que pode apontar para outra conta, não tem efeito. Sem `GOOGLE_ADS_CREDENTIALS`, o servidor usa as Application Default Credentials.
 
 ## Instalação e uso
 

@@ -144,6 +144,26 @@ def test_session_loads_env_file_before_resolving_credentials(monkeypatch, tmp_pa
     assert seen["path"] == "/keys/ads.json"
 
 
+def test_credentials_variable_wins_over_inherited_application_credentials(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"{auth.CREDENTIALS_ENV}=/keys/ads.json\n")
+    monkeypatch.setenv(auth.ENV_FILE_ENV, str(env_file))
+    monkeypatch.delenv(auth.CREDENTIALS_ENV, raising=False)
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/keys/personal.json")
+    monkeypatch.setattr(auth, "_session", None)
+    seen = {}
+
+    def fake_load(path, scopes):
+        seen["path"], seen["scopes"] = path, scopes
+        return object(), None
+
+    monkeypatch.setattr(auth.google.auth, "load_credentials_from_file", fake_load)
+    monkeypatch.setattr(auth, "AuthorizedSession", lambda credentials: credentials)
+    auth.get_session()
+
+    assert seen == {"path": "/keys/ads.json", "scopes": auth.SCOPES}
+
+
 def test_api_helpers(monkeypatch):
     calls = []
 

@@ -8,6 +8,7 @@ from google.auth.transport.requests import AuthorizedSession
 
 SCOPES = ["https://www.googleapis.com/auth/adwords"]
 
+CREDENTIALS_ENV = "GOOGLE_ADS_CREDENTIALS"
 ENV_FILE_ENV = "GOOGLE_ADS_ENV_FILE"
 DEFAULT_ENV_FILES = (
     Path.home() / ".config" / "google-ads" / ".env",
@@ -43,6 +44,10 @@ def get_session() -> AuthorizedSession:
     global _session
     if _session is None:
         load_env_files()
-        credentials, _ = google.auth.default(scopes=SCOPES)
+        path = os.environ.get(CREDENTIALS_ENV)
+        if path:
+            credentials, _ = google.auth.load_credentials_from_file(path, scopes=SCOPES)
+        else:
+            credentials, _ = google.auth.default(scopes=SCOPES)
         _session = AuthorizedSession(credentials)
     return _session
