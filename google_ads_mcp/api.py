@@ -4,7 +4,7 @@ import os
 import re
 from typing import Any
 
-from .auth import get_session
+from .auth import get_session, load_env_files
 
 API_VERSION = "v25"
 BASE = f"https://googleads.googleapis.com/{API_VERSION}"
@@ -20,6 +20,7 @@ def digits(value: str | int) -> str:
 
 
 def _headers(login_customer_id: str | int | None = None) -> dict[str, str]:
+    load_env_files()
     token = os.environ.get("GOOGLE_ADS_DEVELOPER_TOKEN")
     if not token:
         raise GoogleAdsApiError("GOOGLE_ADS_DEVELOPER_TOKEN is not set.")

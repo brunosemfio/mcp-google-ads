@@ -159,6 +159,39 @@ As aspas protegem as vírgulas: sem elas, o PowerShell quebra a lista de escopos
 
 Se o acesso às contas passa por uma conta gerente (MCC), defina `GOOGLE_ADS_LOGIN_CUSTOMER_ID` com o ID da conta gerente, só com dígitos. As ferramentas de leitura também aceitam o parâmetro `login_customer_id`, que tem prioridade sobre a variável.
 
+### 5. Arquivo `.env` (opcional)
+
+Para não repetir os valores em cada cliente MCP, grave as variáveis num arquivo `.env`. O servidor lê o primeiro arquivo que encontrar:
+
+1. `$GOOGLE_ADS_ENV_FILE`, se definido;
+2. `~/.config/google-ads/.env`;
+3. `.env` no diretório de trabalho.
+
+No macOS, no Terminal:
+
+```bash
+mkdir -p ~/.config/google-ads
+cat > ~/.config/google-ads/.env <<'ENV'
+GOOGLE_APPLICATION_CREDENTIALS=/Users/voce/.config/gcloud/application_default_credentials.json
+GOOGLE_ADS_DEVELOPER_TOKEN=SEU_DEVELOPER_TOKEN
+GOOGLE_ADS_LOGIN_CUSTOMER_ID=1234567890
+ENV
+chmod 600 ~/.config/google-ads/.env
+```
+
+No Windows, no PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\.config\google-ads" | Out-Null
+@"
+GOOGLE_APPLICATION_CREDENTIALS=C:\Users\voce\AppData\Roaming\gcloud\application_default_credentials.json
+GOOGLE_ADS_DEVELOPER_TOKEN=SEU_DEVELOPER_TOKEN
+GOOGLE_ADS_LOGIN_CUSTOMER_ID=1234567890
+"@ | Set-Content -Encoding utf8 "$HOME\.config\google-ads\.env"
+```
+
+Variáveis já definidas no ambiente, inclusive pelo `--env` ou pelo `env` do cliente MCP, têm prioridade sobre o arquivo. O servidor lê o arquivo uma vez por processo, e a ausência do arquivo não é erro. O arquivo aceita `export ` no começo da linha, comentários com `#` e valores entre aspas. Escreva o caminho completo das credenciais: o servidor não expande o `~` em `GOOGLE_APPLICATION_CREDENTIALS`.
+
 ## Instalação e uso
 
 ### Direto do GitHub (recomendado)
@@ -197,6 +230,7 @@ Se o servidor subir sem erro, ele fica aguardando um cliente MCP. Encerre com Ct
 
    - Troque os valores de `--env` pelo caminho das suas credenciais, pelo seu developer token e pelo ID da sua conta gerente.
    - Sem conta gerente, remova a linha do `GOOGLE_ADS_LOGIN_CUSTOMER_ID`.
+   - Com o [arquivo `.env`](#5-arquivo-env-opcional), remova as linhas de `--env`.
 
 2. Rode `claude mcp list`. O `google-ads` deve aparecer como conectado.
 
@@ -228,7 +262,7 @@ Adicione a entrada abaixo em `mcpServers` no arquivo `claude_desktop_config.json
 }
 ```
 
-No Windows, dobre as barras invertidas nos caminhos, como o JSON exige. Depois de salvar, encerre o Claude Desktop (Cmd+Q no macOS; Sair no ícone da bandeja no Windows) e abra de novo.
+No Windows, dobre as barras invertidas nos caminhos, como o JSON exige. Com o [arquivo `.env`](#5-arquivo-env-opcional), remova o bloco `env` inteiro e a vírgula que sobrar no fim do `]` de `args`. Depois de salvar, encerre o Claude Desktop (Cmd+Q no macOS; Sair no ícone da bandeja no Windows) e abra de novo.
 
 O `uvx` faz cache do build: para atualizar após novos commits, rode o comando uma vez com `--refresh`. Para fixar uma versão, aponte para uma tag ou commit: `git+https://...@<tag-ou-sha>`.
 

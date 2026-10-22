@@ -1,11 +1,18 @@
 import asyncio
+import os
 
 import pytest
 from fastmcp import Client
 
-from google_ads_mcp import api, server
+from google_ads_mcp import api, auth, server
 
 CID = "1234567890"
+
+
+@pytest.fixture(autouse=True)
+def isolate_env_files(monkeypatch, tmp_path):
+    monkeypatch.setenv(auth.ENV_FILE_ENV, str(tmp_path / "absent.env"))
+    monkeypatch.setattr(auth, "_env_files_loaded", False)
 
 
 def _tool(name):
@@ -92,6 +99,49 @@ def test_headers(monkeypatch):
     monkeypatch.delenv("GOOGLE_ADS_DEVELOPER_TOKEN")
     with pytest.raises(api.GoogleAdsApiError, match="DEVELOPER_TOKEN"):
         api._headers()
+
+
+def test_env_file_fills_missing_variables(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_bytes(
+        b"\xef\xbb\xbf# credenciais\r\n"
+        b"export GOOGLE_ADS_DEVELOPER_TOKEN=from_file\r\n"
+        b'GOOGLE_ADS_LOGIN_CUSTOMER_ID="999-888-7777"\r\n'
+    )
+    monkeypatch.setenv(auth.ENV_FILE_ENV, str(env_file))
+    monkeypatch.delenv("GOOGLE_ADS_DEVELOPER_TOKEN", raising=False)
+    monkeypatch.delenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID", raising=False)
+
+    assert api._headers() == {"developer-token": "from_file", "login-customer-id": "9998887777"}
+
+
+def test_real_environment_wins_over_env_file(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("GOOGLE_ADS_DEVELOPER_TOKEN=from_file\n")
+    monkeypatch.setenv(auth.ENV_FILE_ENV, str(env_file))
+    monkeypatch.setenv("GOOGLE_ADS_DEVELOPER_TOKEN", "from_env")
+    monkeypatch.delenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID", raising=False)
+
+    assert api._headers() == {"developer-token": "from_env"}
+
+
+def test_session_loads_env_file_before_resolving_credentials(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("GOOGLE_APPLICATION_CREDENTIALS=/keys/ads.json\n")
+    monkeypatch.setenv(auth.ENV_FILE_ENV, str(env_file))
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.setattr(auth, "_session", None)
+    seen = {}
+
+    def fake_default(scopes):
+        seen["path"] = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+        return object(), None
+
+    monkeypatch.setattr(auth.google.auth, "default", fake_default)
+    monkeypatch.setattr(auth, "AuthorizedSession", lambda credentials: credentials)
+    auth.get_session()
+
+    assert seen["path"] == "/keys/ads.json"
 
 
 def test_api_helpers(monkeypatch):
