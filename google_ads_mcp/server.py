@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
@@ -77,6 +78,26 @@ CLONED_CRITERIA = {
 }
 
 DAYS = ("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY")
+
+ASSET_TYPES = {
+    "SITELINK": ("sitelinkAsset", ("link_text", "final_url")),
+    "CALLOUT": ("calloutAsset", ("text",)),
+    "STRUCTURED_SNIPPET": ("structuredSnippetAsset", ("header", "values")),
+    "CALL": ("callAsset", ("phone_number", "country_code")),
+}
+
+ASSET_COLUMNS = (
+    "asset.final_urls, asset.sitelink_asset.link_text, asset.sitelink_asset.description1, "
+    "asset.sitelink_asset.description2, asset.callout_asset.callout_text, "
+    "asset.structured_snippet_asset.header, asset.structured_snippet_asset.values, "
+    "asset.call_asset.country_code, asset.call_asset.phone_number"
+)
+
+ASSET_LINKS = {
+    "customerAssets": ("customer_asset", "customerAssetOperation"),
+    "campaignAssets": ("campaign_asset", "campaignAssetOperation"),
+    "adGroupAssets": ("ad_group_asset", "adGroupAssetOperation"),
+}
 
 
 def _cid(customer_id: str | int) -> str:
@@ -1278,6 +1299,203 @@ def set_ad_final_url(
         confirm,
         before={**context, "final_urls": _field(row, "ad_group_ad.ad.final_urls")},
         after={**context, "final_urls": [final_url]},
+    )
+
+
+def _asset(spec: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    kind = str(spec.get("type", "")).upper()
+    if kind not in ASSET_TYPES or not all(spec.get(key) for key in ASSET_TYPES[kind][1]):
+        raise ValueError(
+            f"Invalid asset {spec!r}: needs type in {tuple(ASSET_TYPES)} and its fields "
+            "(see the tool description)."
+        )
+    if kind == "SITELINK":
+        descriptions = {key: spec[key] for key in ("description1", "description2") if key in spec}
+        return kind, {
+            "finalUrls": [spec["final_url"]],
+            "sitelinkAsset": {"linkText": spec["link_text"], **descriptions},
+        }
+    if kind == "CALLOUT":
+        return kind, {"calloutAsset": {"calloutText": spec["text"]}}
+    if kind == "STRUCTURED_SNIPPET":
+        return kind, {
+            "structuredSnippetAsset": {"header": spec["header"], "values": spec["values"]}
+        }
+    return kind, {
+        "callAsset": {"countryCode": spec["country_code"], "phoneNumber": spec["phone_number"]}
+    }
+
+
+def _asset_key(kind: str, asset: dict[str, Any]) -> tuple[str, str]:
+    content = _pick(asset, "finalUrls", ASSET_TYPES[kind][0])
+    return kind, json.dumps(content, sort_keys=True).lower()
+
+
+@mcp.tool(annotations=WRITE)
+def add_assets(
+    customer_id: str | int,
+    assets: list[dict[str, Any]],
+    campaign_id: str | int | None = None,
+    ad_group_id: str | int | None = None,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Create sitelink, callout, structured snippet or call assets and link them to the
+    account (default), a campaign (campaign_id) or an ad group (ad_group_id), in one atomic call.
+
+    Each asset is one of:
+    {"type": "SITELINK", "link_text": "...", "final_url": "https://...", "description1": "...",
+    "description2": "..."} (descriptions are optional, both or none);
+    {"type": "CALLOUT", "text": "..."};
+    {"type": "STRUCTURED_SNIPPET", "header": "Types", "values": ["...", "...", "..."]} (header
+    is one of Google's fixed English headers, 3 to 10 values);
+    {"type": "CALL", "phone_number": "(305) 555-0100", "country_code": "US"}.
+    Account assets serve in every campaign. Campaign or ad group assets of a type replace,
+    there, the ones of that type from higher levels. Assets with the same content already
+    linked at that level are skipped with a warning. With confirm=true resource_names
+    alternate between each new asset and its link. With confirm=false (default) the change is
+    only validated and a preview is returned. Call again with confirm=true only after the user
+    explicitly approves the preview.
+    """
+    if campaign_id is not None and ad_group_id is not None:
+        raise ValueError("Pass campaign_id or ad_group_id, not both.")
+    if not assets:
+        raise ValueError("assets must not be empty.")
+    cid = _cid(customer_id)
+    wanted = [_asset(spec) for spec in assets]
+    link: dict[str, str] = {}
+    columns = scope = ""
+    if ad_group_id is not None:
+        ad_group = _id(ad_group_id, "ad_group_id")
+        row = _query_one(
+            cid, f"SELECT ad_group.name FROM ad_group WHERE ad_group.id = {ad_group}", "ad_group"
+        )
+        target = {"ad_group": _field(row, "ad_group.name")}
+        resource, operation = "ad_group_asset", "adGroupAssetOperation"
+        columns, scope = "ad_group.id, ", f" AND ad_group.id = {ad_group}"
+        link = {"adGroup": f"customers/{cid}/adGroups/{ad_group}"}
+    elif campaign_id is not None:
+        campaign = _id(campaign_id, "campaign_id")
+        row = _query_one(
+            cid, f"SELECT campaign.name FROM campaign WHERE campaign.id = {campaign}", "campaign"
+        )
+        target = {"campaign": _field(row, "campaign.name")}
+        resource, operation = "campaign_asset", "campaignAssetOperation"
+        columns, scope = "campaign.id, ", f" AND campaign.id = {campaign}"
+        link = {"campaign": f"customers/{cid}/campaigns/{campaign}"}
+    else:
+        target = {"account": cid}
+        resource, operation = "customer_asset", "customerAssetOperation"
+    existing = api.search_stream(
+        cid,
+        f"SELECT {columns}{resource}.field_type, {ASSET_COLUMNS} FROM {resource} "
+        f"WHERE {resource}.status != 'REMOVED' "
+        f"AND {resource}.field_type IN ({', '.join(ASSET_TYPES)}){scope}",
+    )
+    counts: dict[str, int] = {}
+    seen = set()
+    for r in existing:
+        kind = _field(r, f"{resource}.field_type")
+        counts[kind] = counts.get(kind, 0) + 1
+        seen.add(_asset_key(kind, r.get("asset", {})))
+    added: list[dict[str, Any]] = []
+    operations: list[dict[str, Any]] = []
+    warnings = []
+    for spec, (kind, body) in zip(assets, wanted, strict=True):
+        key = _asset_key(kind, body)
+        if key in seen:
+            warnings.append(f"Skipped existing {kind} asset {spec!r}.")
+            continue
+        seen.add(key)
+        temp = f"customers/{cid}/assets/-{len(added) + 1}"
+        operations += [
+            {"assetOperation": {"create": {"resourceName": temp, **body}}},
+            {operation: {"create": {**link, "asset": temp, "fieldType": kind}}},
+        ]
+        added.append({**spec, "type": kind})
+    if not added:
+        raise ValueError("All assets already exist at that level.")
+    after_counts = dict(counts)
+    for asset in added:
+        after_counts[asset["type"]] = after_counts.get(asset["type"], 0) + 1
+    if link:
+        level = next(iter(target)).replace("_", " ")
+        warnings += [
+            f"The {level} had no {kind} assets of its own: these replace the {kind} assets "
+            "it inherited from higher levels."
+            for kind in dict.fromkeys(asset["type"] for asset in added)
+            if not counts.get(kind)
+        ]
+    return _write(
+        cid,
+        operations,
+        confirm,
+        before={**target, "assets": counts},
+        after={**target, "assets": after_counts, "added": added},
+        warnings=warnings,
+    )
+
+
+@mcp.tool(annotations=WRITE)
+def remove_assets(
+    customer_id: str | int,
+    resource_names: list[str],
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Unlink assets (sitelinks, callouts, images...) from the account, campaigns or ad groups,
+    in one all-or-nothing call. The assets stay in the account library.
+
+    resource_names are the links' resource names as returned by `search`, e.g.
+    customers/123/customerAssets/456~SITELINK (customer_asset.resource_name),
+    customers/123/campaignAssets/789~456~CALLOUT (campaign_asset.resource_name) or
+    customers/123/adGroupAssets/789~456~CALL (ad_group_asset.resource_name). With
+    confirm=false (default) the removal is only validated and a preview is returned. Call
+    again with confirm=true only after the user explicitly approves the preview.
+    """
+    cid = _cid(customer_id)
+    if not resource_names:
+        raise ValueError("resource_names must not be empty.")
+    by_kind: dict[str, list[str]] = {}
+    for name in dict.fromkeys(resource_names):
+        match = re.fullmatch(
+            r"customers/(\d+)/(customerAssets|campaignAssets|adGroupAssets)/(?:\d+~)+[A-Z_]+",
+            name,
+        )
+        if not match or match.group(1) != cid:
+            raise ValueError(f"Invalid asset link resource_name {name!r} for account {cid}.")
+        by_kind.setdefault(match.group(2), []).append(name)
+    removed, operations = [], []
+    content = ["finalUrls", *(key for key, _ in ASSET_TYPES.values())]
+    for kind, names in by_kind.items():
+        resource, operation = ASSET_LINKS[kind]
+        quoted = ", ".join(f"'{name}'" for name in names)
+        rows = {
+            _field(row, f"{resource}.resource_name"): row
+            for row in api.search_stream(
+                cid,
+                f"SELECT {resource}.resource_name, {resource}.field_type, {ASSET_COLUMNS} "
+                f"FROM {resource} WHERE {resource}.resource_name IN ({quoted}) "
+                f"AND {resource}.status != 'REMOVED'",
+            )
+        }
+        missing = [name for name in names if name not in rows]
+        if missing:
+            raise ValueError(f"Asset links not found in account {cid}: {', '.join(missing)}.")
+        for name in names:
+            removed.append(
+                {
+                    "resource_name": name,
+                    "field_type": _field(rows[name], f"{resource}.field_type"),
+                    **_pick(rows[name].get("asset", {}), *content),
+                }
+            )
+            operations.append({operation: {"remove": name}})
+    return _write(
+        cid,
+        operations,
+        confirm,
+        before=removed,
+        after=None,
+        warnings=[f"{len(removed)} asset link(s) will be removed; the assets stay in the account."],
     )
 
 

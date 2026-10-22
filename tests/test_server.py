@@ -591,7 +591,7 @@ def test_tool_annotations():
 
     tools = {tool.name: tool.annotations for tool in asyncio.run(list_tools())}
     read = {"list_accessible_customers", "search", "get_resource_metadata"}
-    assert len(tools) == 15
+    assert len(tools) == 17
     for name, annotations in tools.items():
         if name in read:
             assert annotations.readOnlyHint is True
@@ -988,4 +988,148 @@ def test_set_ad_final_url_rules(ads):
         _tool("set_ad_final_url")(CID, "9", "x.com/houston")
     with pytest.raises(ValueError, match="not found"):
         _tool("set_ad_final_url")(CID, "9", "https://x.com/houston")
+    assert not ads["mutations"]
+
+
+SITELINK = {
+    "type": "sitelink",
+    "link_text": "Pricing",
+    "final_url": "https://x.com/pricing",
+    "description1": "A",
+    "description2": "B",
+}
+
+
+def test_add_assets_to_account(ads):
+    result = _tool("add_assets")(
+        CID,
+        [
+            SITELINK,
+            {"type": "CALLOUT", "text": "Free delivery"},
+            {"type": "STRUCTURED_SNIPPET", "header": "Types", "values": ["a", "b", "c"]},
+            {"type": "CALL", "phone_number": "(305) 555-0100", "country_code": "US"},
+        ],
+    )
+    temps = [f"customers/{CID}/assets/-{i}" for i in range(1, 5)]
+    bodies = [
+        {
+            "finalUrls": ["https://x.com/pricing"],
+            "sitelinkAsset": {"linkText": "Pricing", "description1": "A", "description2": "B"},
+        },
+        {"calloutAsset": {"calloutText": "Free delivery"}},
+        {"structuredSnippetAsset": {"header": "Types", "values": ["a", "b", "c"]}},
+        {"callAsset": {"countryCode": "US", "phoneNumber": "(305) 555-0100"}},
+    ]
+    kinds = ["SITELINK", "CALLOUT", "STRUCTURED_SNIPPET", "CALL"]
+    expected = []
+    for temp, body, kind in zip(temps, bodies, kinds, strict=True):
+        expected += [
+            {"assetOperation": {"create": {"resourceName": temp, **body}}},
+            {"customerAssetOperation": {"create": {"asset": temp, "fieldType": kind}}},
+        ]
+    assert ads["mutations"][0]["operations"] == expected
+    assert "FROM customer_asset WHERE customer_asset.status != 'REMOVED'" in ads["queries"][0]
+    assert result["before"] == {"account": CID, "assets": {}}
+    assert result["after"]["assets"] == dict.fromkeys(kinds, 1)
+    assert result["after"]["added"][0]["type"] == "SITELINK"
+    assert result["warnings"] == []
+
+
+def test_add_assets_to_campaign_skips_existing(ads):
+    ads["rows"]["FROM campaign WHERE"] = [{"campaign": {"name": "C"}}]
+    ads["rows"]["FROM campaign_asset"] = [
+        {
+            "campaignAsset": {"fieldType": "CALLOUT"},
+            "asset": {"calloutAsset": {"calloutText": "Free Delivery"}},
+        }
+    ]
+    result = _tool("add_assets")(
+        CID, [{"type": "CALLOUT", "text": "free delivery"}, SITELINK], campaign_id="7"
+    )
+    temp = f"customers/{CID}/assets/-1"
+    assert ads["mutations"][0]["operations"][1] == {
+        "campaignAssetOperation": {
+            "create": {
+                "campaign": f"customers/{CID}/campaigns/7",
+                "asset": temp,
+                "fieldType": "SITELINK",
+            }
+        }
+    }
+    assert len(ads["mutations"][0]["operations"]) == 2
+    assert "SELECT campaign.id, campaign_asset.field_type" in ads["queries"][1]
+    assert "AND campaign.id = 7" in ads["queries"][1]
+    assert result["before"] == {"campaign": "C", "assets": {"CALLOUT": 1}}
+    assert result["after"]["assets"] == {"CALLOUT": 1, "SITELINK": 1}
+    assert "Skipped existing CALLOUT" in result["warnings"][0]
+    assert "campaign had no SITELINK" in result["warnings"][1]
+
+
+def test_add_assets_to_ad_group(ads):
+    ads["rows"]["FROM ad_group WHERE"] = [{"adGroup": {"name": "G"}}]
+    result = _tool("add_assets")(CID, [{"type": "CALLOUT", "text": "x"}], ad_group_id="5")
+    link = ads["mutations"][0]["operations"][1]["adGroupAssetOperation"]["create"]
+    assert link["adGroup"] == f"customers/{CID}/adGroups/5"
+    assert "AND ad_group.id = 5" in ads["queries"][1]
+    assert "ad group had no CALLOUT" in result["warnings"][0]
+
+
+def test_add_assets_rules(ads):
+    callout = [{"type": "CALLOUT", "text": "x"}]
+    with pytest.raises(ValueError, match="not both"):
+        _tool("add_assets")(CID, callout, campaign_id="7", ad_group_id="5")
+    with pytest.raises(ValueError, match="empty"):
+        _tool("add_assets")(CID, [])
+    for bad in (
+        {"type": "PROMOTION", "text": "x"},
+        {"type": "SITELINK", "link_text": "x"},
+        {"type": "CALLOUT", "text": ""},
+    ):
+        with pytest.raises(ValueError, match="Invalid asset"):
+            _tool("add_assets")(CID, [bad])
+    ads["rows"]["FROM customer_asset"] = [
+        {"customerAsset": {"fieldType": "CALLOUT"}, "asset": {"calloutAsset": {"calloutText": "x"}}}
+    ]
+    with pytest.raises(ValueError, match="already exist"):
+        _tool("add_assets")(CID, callout)
+    assert not ads["mutations"]
+
+
+@pytest.mark.parametrize(
+    "kind, resource, operation, suffix",
+    [
+        ("customerAssets", "customerAsset", "customerAssetOperation", "9~SITELINK"),
+        ("campaignAssets", "campaignAsset", "campaignAssetOperation", "7~9~CALLOUT"),
+        ("adGroupAssets", "adGroupAsset", "adGroupAssetOperation", "5~9~STRUCTURED_SNIPPET"),
+    ],
+)
+def test_remove_assets(ads, kind, resource, operation, suffix):
+    name = f"customers/{CID}/{kind}/{suffix}"
+    ads["rows"]["FROM"] = [
+        {
+            resource: {"resourceName": name, "fieldType": "CALLOUT"},
+            "asset": {"resourceName": "rn/9", "calloutAsset": {"calloutText": "x"}},
+        }
+    ]
+    result = _tool("remove_assets")(CID, [name, name])
+    assert ads["mutations"][0]["operations"] == [{operation: {"remove": name}}]
+    assert f"resource_name IN ('{name}')" in ads["queries"][0]
+    assert result["before"] == [
+        {"resource_name": name, "field_type": "CALLOUT", "calloutAsset": {"calloutText": "x"}}
+    ]
+    assert result["after"] is None
+
+
+def test_remove_assets_rules(ads):
+    for name in (
+        "customers/999/customerAssets/9~SITELINK",
+        f"customers/{CID}/assets/9",
+        f"customers/{CID}/customerAssets/9~SITELINK' OR '1'='1",
+    ):
+        with pytest.raises(ValueError, match="Invalid asset link"):
+            _tool("remove_assets")(CID, [name])
+    with pytest.raises(ValueError, match="empty"):
+        _tool("remove_assets")(CID, [])
+    with pytest.raises(ValueError, match="not found"):
+        _tool("remove_assets")(CID, [f"customers/{CID}/customerAssets/9~SITELINK"])
     assert not ads["mutations"]

@@ -276,3 +276,55 @@ def test_set_ad_schedule(campaign):
 def test_set_ad_final_url(ad):
     result = _tool("set_ad_final_url")(CID, ad["ad_group_ad.ad.id"], "https://example.com/")
     _assert_preview(result)
+
+
+def test_add_assets(campaign, keyword):
+    assets = [
+        {
+            "type": "SITELINK",
+            "link_text": "MCP test",
+            "final_url": "https://example.com/",
+            "description1": "Line one",
+            "description2": "Line two",
+        },
+        {"type": "CALLOUT", "text": "MCP validate only"},
+        {"type": "STRUCTURED_SNIPPET", "header": "Types", "values": ["One", "Two", "Three"]},
+        {"type": "CALL", "phone_number": "(305) 555-0100", "country_code": "US"},
+    ]
+    targets = (
+        {},
+        {"campaign_id": campaign["campaign.id"]},
+        {"ad_group_id": keyword["ad_group.id"]},
+    )
+    for target in targets:
+        _assert_preview(_tool("add_assets")(CID, assets, **target))
+
+
+def test_add_assets_skips_existing():
+    row = _first(
+        ["asset.callout_asset.callout_text"],
+        "customer_asset",
+        ["customer_asset.field_type = 'CALLOUT'", "customer_asset.status = 'ENABLED'"],
+    )
+    with pytest.raises(ValueError, match="already exist"):
+        _tool("add_assets")(
+            CID, [{"type": "CALLOUT", "text": row["asset.callout_asset.callout_text"]}]
+        )
+
+
+def test_remove_assets():
+    account = _first(
+        ["customer_asset.resource_name"], "customer_asset", ["customer_asset.status = 'ENABLED'"]
+    )
+    campaign = _first(
+        ["campaign_asset.resource_name", "campaign.advertising_channel_type"],
+        "campaign_asset",
+        [
+            "campaign_asset.status = 'ENABLED'",
+            "campaign.advertising_channel_type = 'SEARCH'",
+        ],
+    )
+    links = [account["customer_asset.resource_name"], campaign["campaign_asset.resource_name"]]
+    result = _tool("remove_assets")(CID, links)
+    _assert_preview(result)
+    assert [link["resource_name"] for link in result["before"]] == links

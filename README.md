@@ -1,6 +1,6 @@
 # Google Ads MCP Server
 
-Servidor MCP (Model Context Protocol) que lê e edita contas do Google Ads pela Google Ads API REST (`v25`). As ferramentas de leitura têm os mesmos parâmetros do [googleads/google-ads-mcp](https://github.com/googleads/google-ads-mcp). As ferramentas de edição alteram status, orçamento, lances, estratégia de lance, palavras-chave, locais, programação de horários e URL final dos anúncios, e clonam campanhas de pesquisa, sempre com uma prévia antes da alteração real.
+Servidor MCP (Model Context Protocol) que lê e edita contas do Google Ads pela Google Ads API REST (`v25`). As ferramentas de leitura têm os mesmos parâmetros do [googleads/google-ads-mcp](https://github.com/googleads/google-ads-mcp). As ferramentas de edição alteram status, orçamento, lances, estratégia de lance, palavras-chave, locais, programação de horários e URL final dos anúncios, criam e desvinculam assets (sitelinks, frases de destaque, snippets estruturados e chamadas) e clonam campanhas de pesquisa, sempre com uma prévia antes da alteração real.
 
 ## Ferramentas expostas
 
@@ -28,6 +28,8 @@ Servidor MCP (Model Context Protocol) que lê e edita contas do Google Ads pela 
 | `set_locations` | Substitui os locais segmentados de uma campanha por raios (`points`) e/ou IDs de local do Google (`location_ids`). Os locais excluídos (negativos) não mudam. |
 | `set_ad_schedule` | Substitui a programação de horários de uma campanha, em horas inteiras no fuso da conta. Uma lista vazia remove a programação. |
 | `set_ad_final_url` | Altera a URL final de um anúncio (`ad_id`). |
+| `add_assets` | Cria sitelinks, frases de destaque, snippets estruturados e chamadas e vincula à conta (padrão), a uma campanha (`campaign_id`) ou a um grupo de anúncios (`ad_group_id`), numa única chamada. |
+| `remove_assets` | Desvincula assets pelos `resource_names` que o `search` retorna (`customerAssets`, `campaignAssets` ou `adGroupAssets`), numa única chamada. O asset continua na biblioteca da conta. |
 
 As ferramentas de leitura são anotadas com `readOnlyHint=true`. As ferramentas de edição são anotadas com `readOnlyHint=false` e `destructiveHint=true`. Com essas anotações, o Claude Code pede permissão a cada chamada de edição. Não inclua as ferramentas de edição na allowlist de permissões.
 
@@ -65,6 +67,8 @@ Regras aplicadas pelas ferramentas:
 - `set_bidding_strategy` sem meta remove a meta existente. A prévia mostra a meta como `null` em `after`. A troca de estratégia ou de meta reinicia o período de aprendizado da campanha, e a prévia registra esse aviso.
 - O Google rejeita estratégias que o tipo de campanha não aceita. A prévia mostra o erro do Google antes de qualquer alteração.
 - `set_ad_schedule` descarta os ajustes de lance da programação atual e registra esse aviso.
+- `add_assets` ignora assets com o mesmo conteúdo já vinculados no destino e registra cada um em `warnings`. O `validateOnly` do Google não detecta assets duplicados.
+- Assets da conta aparecem em todas as campanhas. Assets de um tipo vinculados a uma campanha ou a um grupo de anúncios substituem, ali, os assets desse tipo dos níveis acima. `add_assets` registra esse aviso quando o destino ainda não tinha assets do tipo.
 - Erros da API retornam a mensagem do Google e o `Request ID`.
 
 ### Clonar uma campanha
@@ -289,3 +293,4 @@ A versão da API fica na constante `API_VERSION` em `google_ads_mcp/api.py`. O G
 - "Adicione 'grátis' e 'emprego' como negativas de frase na campanha X."
 - "Crie uma lista de negativas chamada 'Geral' com estas palavras e vincule às campanhas de pesquisa da conta Y."
 - "Clone a campanha X para Houston, com raio de 20 km no centro da cidade."
+- "Crie as frases de destaque 'Free Delivery' e '24/7 Support' na conta Y."
