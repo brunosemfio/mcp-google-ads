@@ -8,7 +8,7 @@ from typing import Any, Literal
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from . import api
+from . import api, auth
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True)
 WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False)
@@ -1500,6 +1500,7 @@ def remove_assets(
 
 
 def main() -> None:
+    auth.load_env_files()
     mcp.run()
 
 

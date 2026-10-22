@@ -1203,3 +1203,20 @@ def test_remove_assets_rules(ads):
     with pytest.raises(ValueError, match="not found"):
         _tool("remove_assets")(CID, [f"customers/{CID}/customerAssets/9~SITELINK"])
     assert not ads["mutations"]
+
+
+def test_main_loads_env_file_before_serving(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("GOOGLE_ADS_DEVELOPER_TOKEN=from_file\n")
+    monkeypatch.setenv(auth.ENV_FILE_ENV, str(env_file))
+    monkeypatch.delenv("GOOGLE_ADS_DEVELOPER_TOKEN", raising=False)
+    monkeypatch.setattr("sys.argv", ["google-ads-mcp"])
+    seen = []
+
+    def fake_run(*args, **kwargs):
+        seen.append(os.environ.get("GOOGLE_ADS_DEVELOPER_TOKEN"))
+
+    monkeypatch.setattr(server.mcp, "run", fake_run)
+    server.main()
+
+    assert seen == ["from_file"]
