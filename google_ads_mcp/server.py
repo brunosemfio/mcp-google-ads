@@ -19,7 +19,8 @@ mcp = FastMCP(
         "Read and edit Google Ads accounts. Use list_accessible_customers and search (GAQL) to "
         "find accounts, campaigns, ad groups, ads and keywords, and get_resource_metadata to "
         "discover valid fields. Write tools default to confirm=false: the change is only "
-        "validated by Google (validateOnly) and a before/after preview is returned. Show the "
+        "validated by Google (validateOnly) and a before/after preview is returned; "
+        "dismiss_recommendations is only looked up, since Google cannot validate it. Show the "
         "preview to the user and call the tool again with confirm=true ONLY after the user "
         "explicitly approves that specific change in the conversation. Money amounts are in the "
         "account currency (returned as `currency`), never in micros."
@@ -1522,6 +1523,80 @@ def remove_assets(
         after=None,
         warnings=[f"{len(removed)} asset link(s) will be removed; the assets stay in the account."],
     )
+
+
+@mcp.tool(annotations=WRITE)
+def dismiss_recommendations(
+    customer_id: str | int,
+    resource_names: list[str],
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Dismiss up to 100 Google Ads recommendations of a single type in one all-or-nothing
+    call. Campaigns do not change: the recommendations are hidden and stop counting in the
+    optimization score.
+
+    resource_names are recommendation.resource_name values returned by `search` on the
+    `recommendation` resource, e.g. customers/123/recommendations/NzkzMTQz. Google has no
+    validateOnly for dismissals: with confirm=false (default) the recommendations are only
+    looked up and a preview is returned. Call again with confirm=true only after the user
+    explicitly approves the preview.
+    """
+    cid = _cid(customer_id)
+    names = list(dict.fromkeys(resource_names))
+    if not names or len(names) > 100:
+        raise ValueError("resource_names must have between 1 and 100 items.")
+    for name in names:
+        match = re.fullmatch(r"customers/(\d+)/recommendations/[A-Za-z0-9_-]+", name)
+        if not match or match.group(1) != cid:
+            raise ValueError(f"Invalid recommendation resource_name {name!r} for account {cid}.")
+    quoted = ", ".join(f"'{name}'" for name in names)
+    rows = {
+        _field(row, "recommendation.resource_name"): row
+        for row in api.search_stream(
+            cid,
+            "SELECT recommendation.resource_name, recommendation.type, campaign.name, "
+            "recommendation.keyword_recommendation FROM recommendation "
+            f"WHERE recommendation.resource_name IN ({quoted}) "
+            "AND recommendation.dismissed = FALSE",
+        )
+    }
+    missing = [name for name in names if name not in rows]
+    if missing:
+        raise ValueError(
+            f"Recommendations not found or already dismissed in account {cid}: "
+            f"{', '.join(missing)}."
+        )
+    before = [
+        {
+            "resource_name": name,
+            "type": _field(rows[name], "recommendation.type"),
+            "campaign": _field(rows[name], "campaign.name"),
+            **_pick(_field(rows[name], "recommendation.keyword_recommendation") or {}, "keyword"),
+        }
+        for name in names
+    ]
+    types = sorted({item["type"] for item in before})
+    if len(types) > 1:
+        raise ValueError(
+            f"Google dismisses one recommendation type per call; got {', '.join(types)}."
+        )
+    result: dict[str, Any] = {
+        "applied": confirm,
+        "before": before,
+        "after": None,
+        "currency": None,
+        "warnings": [
+            f"{len(names)} recommendation(s) will be dismissed. Google does not validate "
+            "dismissals in advance."
+        ],
+    }
+    if confirm:
+        response = api.post(
+            f"customers/{cid}/recommendations:dismiss",
+            {"operations": [{"resourceName": name} for name in names]},
+        )
+        result["resource_names"] = [item["resourceName"] for item in response.get("results", [])]
+    return result
 
 
 @mcp.tool(annotations=WRITE)

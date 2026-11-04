@@ -1,6 +1,6 @@
 # Google Ads MCP Server
 
-Servidor MCP (Model Context Protocol) que lê e edita contas do Google Ads pela Google Ads API REST (`v25`). As ferramentas de leitura têm os mesmos parâmetros do [googleads/google-ads-mcp](https://github.com/googleads/google-ads-mcp). As ferramentas de edição alteram status, orçamento, lances, estratégia de lance, palavras-chave, locais, programação de horários e URL final dos anúncios, criam e desvinculam assets (sitelinks, frases de destaque, snippets estruturados e chamadas), criam campanhas de pesquisa, grupos de anúncios e anúncios responsivos e clonam campanhas de pesquisa, sempre com uma prévia antes da alteração real.
+Servidor MCP (Model Context Protocol) que lê e edita contas do Google Ads pela Google Ads API REST (`v25`). As ferramentas de leitura têm os mesmos parâmetros do [googleads/google-ads-mcp](https://github.com/googleads/google-ads-mcp). As ferramentas de edição alteram status, orçamento, lances, estratégia de lance, palavras-chave, locais, programação de horários e URL final dos anúncios, criam e desvinculam assets (sitelinks, frases de destaque, snippets estruturados e chamadas), criam campanhas de pesquisa, grupos de anúncios e anúncios responsivos, clonam campanhas de pesquisa e dispensam recomendações, sempre com uma prévia antes da alteração real.
 
 ## Ferramentas expostas
 
@@ -33,6 +33,7 @@ Servidor MCP (Model Context Protocol) que lê e edita contas do Google Ads pela 
 | `set_ad_final_url` | Altera a URL final de um anúncio (`ad_id`). |
 | `add_assets` | Cria sitelinks, frases de destaque, snippets estruturados e chamadas e vincula à conta (padrão), a uma campanha (`campaign_id`) ou a um grupo de anúncios (`ad_group_id`), numa única chamada. |
 | `remove_assets` | Desvincula assets pelos `resource_names` que o `search` retorna (`customerAssets`, `campaignAssets` ou `adGroupAssets`), numa única chamada. O asset continua na biblioteca da conta. |
+| `dismiss_recommendations` | Dispensa recomendações do Google pelos `resource_names` que o `search` retorna no recurso `recommendation`, numa única chamada de até 100 recomendações do mesmo tipo. As campanhas não mudam. As recomendações dispensadas deixam de contar no índice de otimização. |
 
 As ferramentas de leitura são anotadas com `readOnlyHint=true`. As ferramentas de edição são anotadas com `readOnlyHint=false` e `destructiveHint=true`. Com essas anotações, o Claude Code pede permissão a cada chamada de edição. Não inclua as ferramentas de edição na allowlist de permissões.
 
@@ -72,6 +73,7 @@ Regras aplicadas pelas ferramentas:
 - `set_ad_schedule` descarta os ajustes de lance da programação atual e registra esse aviso.
 - `add_assets` ignora assets com o mesmo conteúdo já vinculados no destino e registra cada um em `warnings`. O `validateOnly` do Google não detecta assets duplicados.
 - Assets da conta aparecem em todas as campanhas. Assets de um tipo vinculados a uma campanha ou a um grupo de anúncios substituem, ali, os assets desse tipo dos níveis acima. `add_assets` registra esse aviso quando o destino ainda não tinha assets do tipo.
+- A API não tem `validateOnly` para dispensar recomendações. Com `confirm=false`, `dismiss_recommendations` só consulta as recomendações e monta a prévia, sem validação do Google. A prévia registra esse aviso.
 - Erros da API retornam a mensagem do Google e o `Request ID`.
 
 ### Criar uma campanha do zero
@@ -332,7 +334,7 @@ GOOGLE_ADS_TEST_CUSTOMER_ID=1112223333 \
 uv run pytest -m integration
 ```
 
-Os testes de integração executam cada ferramenta de edição somente com `validateOnly=true`. Uma fixture falha o teste se alguma chamada tentar aplicar uma alteração. Nenhum teste altera a conta.
+Os testes de integração executam cada ferramenta de edição somente com `validateOnly=true`. `dismiss_recommendations` executa somente com `confirm=false`. Uma fixture falha o teste se alguma chamada tentar aplicar uma alteração ou dispensar uma recomendação. Nenhum teste altera a conta.
 
 O CI (GitHub Actions, branch `main`) roda ruff, mypy e os testes unitários com cobertura mínima de 65% em Python 3.10 e 3.12.
 
@@ -351,3 +353,4 @@ A versão da API fica na constante `API_VERSION` em `google_ads_mcp/api.py`. O G
 - "Clone a campanha X para Houston, com raio de 20 km no centro da cidade."
 - "Crie uma campanha de pesquisa para Dallas com US$ 50 por dia, maximizar conversões e CPA desejado de US$ 40."
 - "Crie as frases de destaque 'Free Delivery' e '24/7 Support' na conta Y."
+- "Liste as recomendações da conta Y e dispense as de expansão para a Rede de Display."

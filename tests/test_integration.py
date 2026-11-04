@@ -17,6 +17,7 @@ from google_ads_mcp import api, server  # noqa: E402
 
 CID = os.environ.get("GOOGLE_ADS_TEST_CUSTOMER_ID", "")
 _real_mutate = api.mutate
+_real_post = api.post
 
 
 def _tool(name):
@@ -31,6 +32,12 @@ def validate_only_guard(monkeypatch):
         return _real_mutate(customer_id, operations, validate_only)
 
     monkeypatch.setattr(api, "mutate", guarded)
+
+    def guarded_post(path, body, login_customer_id=None):
+        assert not path.endswith(":dismiss"), "integration tests must never dismiss"
+        return _real_post(path, body, login_customer_id)
+
+    monkeypatch.setattr(api, "post", guarded_post)
 
 
 def _first(fields, resource, conditions):
@@ -328,6 +335,16 @@ def test_remove_assets():
     result = _tool("remove_assets")(CID, links)
     _assert_preview(result)
     assert [link["resource_name"] for link in result["before"]] == links
+
+
+def test_dismiss_recommendations():
+    row = _first(
+        ["recommendation.resource_name"], "recommendation", ["recommendation.dismissed = FALSE"]
+    )
+    name = row["recommendation.resource_name"]
+    result = _tool("dismiss_recommendations")(CID, [name])
+    _assert_preview(result)
+    assert result["before"][0]["resource_name"] == name
 
 
 @pytest.mark.parametrize(

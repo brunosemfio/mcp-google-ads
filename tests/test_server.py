@@ -661,7 +661,7 @@ def test_tool_annotations():
 
     tools = {tool.name: tool.annotations for tool in asyncio.run(list_tools())}
     read = {"list_accessible_customers", "search", "get_resource_metadata"}
-    assert len(tools) == 20
+    assert len(tools) == 21
     for name, annotations in tools.items():
         if name in read:
             assert annotations.readOnlyHint is True
@@ -1203,6 +1203,81 @@ def test_remove_assets_rules(ads):
     with pytest.raises(ValueError, match="not found"):
         _tool("remove_assets")(CID, [f"customers/{CID}/customerAssets/9~SITELINK"])
     assert not ads["mutations"]
+
+
+def test_dismiss_recommendations(ads, monkeypatch):
+    keyword = f"customers/{CID}/recommendations/Abc-1_x"
+    other = f"customers/{CID}/recommendations/Def2"
+    ads["rows"]["FROM recommendation"] = [
+        {
+            "recommendation": {
+                "resourceName": keyword,
+                "type": "KEYWORD",
+                "keywordRecommendation": {
+                    "keyword": {"text": "photo booth", "matchType": "BROAD"},
+                    "searchTerms": [{"text": "photo booth"}],
+                },
+            },
+            "campaign": {"name": "LA - Rent"},
+        },
+        {"recommendation": {"resourceName": other, "type": "KEYWORD"}},
+    ]
+    posts = []
+
+    def fake_post(path, body, login_customer_id=None):
+        posts.append((path, body))
+        return {"results": [{"resourceName": op["resourceName"]} for op in body["operations"]]}
+
+    monkeypatch.setattr(api, "post", fake_post)
+    preview = _tool("dismiss_recommendations")(CID, [keyword, other, keyword])
+    assert f"IN ('{keyword}', '{other}')" in ads["queries"][0]
+    assert "recommendation.dismissed = FALSE" in ads["queries"][0]
+    assert preview["applied"] is False
+    assert preview["before"] == [
+        {
+            "resource_name": keyword,
+            "type": "KEYWORD",
+            "campaign": "LA - Rent",
+            "keyword": {"text": "photo booth", "matchType": "BROAD"},
+        },
+        {"resource_name": other, "type": "KEYWORD", "campaign": None},
+    ]
+    assert "resource_names" not in preview
+    assert not posts
+
+    result = _tool("dismiss_recommendations")(CID, [keyword, other], confirm=True)
+    assert posts == [
+        (
+            f"customers/{CID}/recommendations:dismiss",
+            {"operations": [{"resourceName": keyword}, {"resourceName": other}]},
+        )
+    ]
+    assert result["applied"] is True
+    assert result["resource_names"] == [keyword, other]
+    assert not ads["mutations"]
+
+
+def test_dismiss_recommendations_rules(ads, monkeypatch):
+    monkeypatch.setattr(api, "post", lambda *args, **kwargs: pytest.fail("must not post"))
+    for name in (
+        "customers/999/recommendations/Abc",
+        f"customers/{CID}/campaigns/9",
+        f"customers/{CID}/recommendations/Abc' OR '1'='1",
+    ):
+        with pytest.raises(ValueError, match="Invalid recommendation"):
+            _tool("dismiss_recommendations")(CID, [name], confirm=True)
+    for names in ([], [f"customers/{CID}/recommendations/R{i}" for i in range(101)]):
+        with pytest.raises(ValueError, match="between 1 and 100"):
+            _tool("dismiss_recommendations")(CID, names)
+    first, second = (f"customers/{CID}/recommendations/{x}" for x in ("A", "B"))
+    with pytest.raises(ValueError, match="already dismissed"):
+        _tool("dismiss_recommendations")(CID, [first], confirm=True)
+    ads["rows"]["FROM recommendation"] = [
+        {"recommendation": {"resourceName": first, "type": "KEYWORD"}},
+        {"recommendation": {"resourceName": second, "type": "SEARCH_PARTNERS_OPT_IN"}},
+    ]
+    with pytest.raises(ValueError, match="KEYWORD, SEARCH_PARTNERS_OPT_IN"):
+        _tool("dismiss_recommendations")(CID, [first, second], confirm=True)
 
 
 def test_main_loads_env_file_before_serving(monkeypatch, tmp_path):
