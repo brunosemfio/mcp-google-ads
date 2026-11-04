@@ -1,6 +1,6 @@
 # Google Ads MCP Server
 
-Servidor MCP (Model Context Protocol) que lê e edita contas do Google Ads pela Google Ads API REST (`v25`). As ferramentas de leitura têm os mesmos parâmetros do [googleads/google-ads-mcp](https://github.com/googleads/google-ads-mcp). As ferramentas de edição alteram status, orçamento, lances, estratégia de lance, palavras-chave, locais, programação de horários e URL final dos anúncios, criam e desvinculam assets (sitelinks, frases de destaque, snippets estruturados e chamadas) e clonam campanhas de pesquisa, sempre com uma prévia antes da alteração real.
+Servidor MCP (Model Context Protocol) que lê e edita contas do Google Ads pela Google Ads API REST (`v25`). As ferramentas de leitura têm os mesmos parâmetros do [googleads/google-ads-mcp](https://github.com/googleads/google-ads-mcp). As ferramentas de edição alteram status, orçamento, lances, estratégia de lance, palavras-chave, locais, programação de horários e URL final dos anúncios, criam e desvinculam assets (sitelinks, frases de destaque, snippets estruturados e chamadas), criam campanhas de pesquisa, grupos de anúncios e anúncios responsivos e clonam campanhas de pesquisa, sempre com uma prévia antes da alteração real.
 
 ## Ferramentas expostas
 
@@ -24,6 +24,9 @@ Servidor MCP (Model Context Protocol) que lê e edita contas do Google Ads pela 
 | `remove_keywords` | Remove palavras-chave pelos `resource_names` que o `search` retorna (`adGroupCriteria`, `campaignCriteria` ou `sharedCriteria`), numa única chamada. |
 | `create_negative_keyword_list` | Cria uma lista de palavras-chave negativas com as palavras iniciais, numa única chamada. |
 | `link_negative_keyword_list` | Vincula uma lista de palavras-chave negativas a campanhas ou, com `unlink=true`, desvincula. |
+| `create_campaign` | Cria uma campanha de pesquisa pausada com orçamento, estratégia de lance, idiomas, locais e programação de horários, numa única chamada. Ver [Criar uma campanha do zero](#criar-uma-campanha-do-zero). |
+| `create_ad_group` | Cria um grupo de anúncios ativo numa campanha de pesquisa, com CPC máximo opcional (`cpc_bid`). |
+| `create_responsive_search_ad` | Cria um anúncio responsivo de pesquisa ativo num grupo de anúncios, com títulos, descrições, URL final e caminhos de exibição. Títulos e descrições aceitam fixação de posição (`pinned_field`). |
 | `clone_campaign` | Cria uma cópia pausada de uma campanha de pesquisa, numa única chamada. Ver [Clonar uma campanha](#clonar-uma-campanha). |
 | `set_locations` | Substitui os locais segmentados de uma campanha por raios (`points`) e/ou IDs de local do Google (`location_ids`). Os locais excluídos (negativos) não mudam. |
 | `set_ad_schedule` | Substitui a programação de horários de uma campanha, em horas inteiras no fuso da conta. Uma lista vazia remove a programação. |
@@ -70,6 +73,23 @@ Regras aplicadas pelas ferramentas:
 - `add_assets` ignora assets com o mesmo conteúdo já vinculados no destino e registra cada um em `warnings`. O `validateOnly` do Google não detecta assets duplicados.
 - Assets da conta aparecem em todas as campanhas. Assets de um tipo vinculados a uma campanha ou a um grupo de anúncios substituem, ali, os assets desse tipo dos níveis acima. `add_assets` registra esse aviso quando o destino ainda não tinha assets do tipo.
 - Erros da API retornam a mensagem do Google e o `Request ID`.
+
+### Criar uma campanha do zero
+
+`create_campaign` cria a campanha com status `PAUSED`. A campanha aparece só na Pesquisa Google. Com `search_partners=true`, ela também aparece nos parceiros de pesquisa. A rede de Display fica desativada.
+
+- `language_ids` recebe IDs de idioma do Google, como `1000` (inglês) e `1014` (português). Sem `language_ids`, a campanha segmenta todos os idiomas.
+- `points` e `location_ids` seguem o formato de `set_locations`. Sem locais, a campanha segmenta todos os países, e a prévia registra esse aviso.
+- `schedule` segue o formato de `set_ad_schedule`. Sem programação, os anúncios rodam em todos os horários.
+
+Para montar a campanha:
+
+1. Crie a campanha com `create_campaign`.
+2. Crie os grupos de anúncios com `create_ad_group`.
+3. Adicione as palavras-chave com `add_keywords`.
+4. Crie os anúncios com `create_responsive_search_ad`.
+5. Se a campanha precisar de assets próprios, crie com `add_assets`.
+6. Ative a campanha com `set_status`.
 
 ### Clonar uma campanha
 
@@ -329,4 +349,5 @@ A versão da API fica na constante `API_VERSION` em `google_ads_mcp/api.py`. O G
 - "Adicione 'grátis' e 'emprego' como negativas de frase na campanha X."
 - "Crie uma lista de negativas chamada 'Geral' com estas palavras e vincule às campanhas de pesquisa da conta Y."
 - "Clone a campanha X para Houston, com raio de 20 km no centro da cidade."
+- "Crie uma campanha de pesquisa para Dallas com US$ 50 por dia, maximizar conversões e CPA desejado de US$ 40."
 - "Crie as frases de destaque 'Free Delivery' e '24/7 Support' na conta Y."

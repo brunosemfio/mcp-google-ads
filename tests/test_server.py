@@ -661,7 +661,7 @@ def test_tool_annotations():
 
     tools = {tool.name: tool.annotations for tool in asyncio.run(list_tools())}
     read = {"list_accessible_customers", "search", "get_resource_metadata"}
-    assert len(tools) == 17
+    assert len(tools) == 20
     for name, annotations in tools.items():
         if name in read:
             assert annotations.readOnlyHint is True
@@ -1220,3 +1220,264 @@ def test_main_loads_env_file_before_serving(monkeypatch, tmp_path):
     server.main()
 
     assert seen == ["from_file"]
+
+
+def _customer(ads):
+    ads["rows"]["FROM customer"] = [
+        {"customer": {"currencyCode": "USD", "timeZone": "America/New_York"}}
+    ]
+
+
+def test_create_campaign(ads):
+    _customer(ads)
+    result = _tool("create_campaign")(
+        CID,
+        " HOU - Rent ",
+        80,
+        "MAXIMIZE_CONVERSIONS",
+        target_cpa=50,
+        language_ids=["1000"],
+        points=[{"latitude": 29.7604, "longitude": -95.3698, "radius": 80}],
+        schedule=[{"day": "monday", "start_hour": 7, "end_hour": 24}],
+    )
+    budget = f"customers/{CID}/campaignBudgets/-1"
+    campaign = f"customers/{CID}/campaigns/-2"
+    proximity = {
+        "geoPoint": {"latitudeInMicroDegrees": 29760400, "longitudeInMicroDegrees": -95369800},
+        "radius": 80.0,
+        "radiusUnits": "KILOMETERS",
+    }
+    assert ads["mutations"][0]["operations"] == [
+        {
+            "campaignBudgetOperation": {
+                "create": {
+                    "resourceName": budget,
+                    "name": "HOU - Rent",
+                    "amountMicros": "80000000",
+                    "explicitlyShared": False,
+                }
+            }
+        },
+        {
+            "campaignOperation": {
+                "create": {
+                    "resourceName": campaign,
+                    "name": "HOU - Rent",
+                    "status": "PAUSED",
+                    "advertisingChannelType": "SEARCH",
+                    "campaignBudget": budget,
+                    "containsEuPoliticalAdvertising": "DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING",
+                    "networkSettings": {
+                        "targetGoogleSearch": True,
+                        "targetSearchNetwork": False,
+                        "targetContentNetwork": False,
+                        "targetPartnerSearchNetwork": False,
+                    },
+                    "maximizeConversions": {"targetCpaMicros": "50000000"},
+                }
+            }
+        },
+        {
+            "campaignCriterionOperation": {
+                "create": {
+                    "campaign": campaign,
+                    "language": {"languageConstant": "languageConstants/1000"},
+                }
+            }
+        },
+        {"campaignCriterionOperation": {"create": {"campaign": campaign, "proximity": proximity}}},
+        {
+            "campaignCriterionOperation": {
+                "create": {
+                    "campaign": campaign,
+                    "adSchedule": {
+                        "dayOfWeek": "MONDAY",
+                        "startHour": 7,
+                        "startMinute": "ZERO",
+                        "endHour": 24,
+                        "endMinute": "ZERO",
+                    },
+                }
+            }
+        },
+    ]
+    assert result["after"] == {
+        "name": "HOU - Rent",
+        "status": "PAUSED",
+        "daily_budget": 80.0,
+        "strategy": "MAXIMIZE_CONVERSIONS",
+        "target_cpa": 50.0,
+        "target_roas": None,
+        "search_partners": False,
+        "languages": ["languageConstants/1000"],
+        "locations": [
+            {"latitude": 29.7604, "longitude": -95.3698, "radius": 80.0, "units": "KILOMETERS"}
+        ],
+        "time_zone": "America/New_York",
+        "schedule": [{"day": "MONDAY", "start_hour": 7, "end_hour": 24}],
+    }
+    assert result["currency"] == "USD"
+    assert result["warnings"] == []
+
+
+@pytest.mark.parametrize(
+    "strategy, targets, field, scheme",
+    [
+        ("MANUAL_CPC", {}, "manualCpc", {}),
+        ("MAXIMIZE_CLICKS", {}, "targetSpend", {}),
+        (
+            "MAXIMIZE_CONVERSIONS",
+            {"target_cpa": 12.5},
+            "maximizeConversions",
+            {"targetCpaMicros": "12500000"},
+        ),
+        (
+            "MAXIMIZE_CONVERSION_VALUE",
+            {"target_roas": 4.0},
+            "maximizeConversionValue",
+            {"targetRoas": 4.0},
+        ),
+    ],
+)
+def test_create_campaign_strategies(ads, strategy, targets, field, scheme):
+    _customer(ads)
+    result = _tool("create_campaign")(
+        CID, "C", 10, strategy, location_ids=["1026339"], search_partners=True, **targets
+    )
+    create = ads["mutations"][0]["operations"][1]["campaignOperation"]["create"]
+    assert create[field] == scheme
+    assert create["networkSettings"]["targetSearchNetwork"] is True
+    assert result["after"]["strategy"] == strategy
+
+
+def test_create_campaign_rules(ads):
+    _customer(ads)
+    for kwargs, message in (
+        ({"name": " "}, "name"),
+        ({"daily_budget": 0}, "amount"),
+        ({"target_cpa": 10}, "target_cpa"),
+        ({"language_ids": ["en"]}, "language_id"),
+        ({"schedule": [{"day": "MONDAY", "start_hour": 9, "end_hour": 3}]}, "schedule"),
+        ({"points": [{"latitude": 1}]}, "Invalid point"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            _tool("create_campaign")(
+                **{
+                    "customer_id": CID,
+                    "name": "C",
+                    "daily_budget": 10,
+                    "strategy": "MANUAL_CPC",
+                    **kwargs,
+                }
+            )
+    assert not ads["mutations"]
+    result = _tool("create_campaign")(CID, "C", 10, "MANUAL_CPC")
+    assert "every country" in result["warnings"][0]
+
+
+def _ad_group_campaign(ads, **campaign):
+    ads["rows"]["FROM campaign"] = [
+        {
+            "customer": {"currencyCode": "USD"},
+            "campaign": {
+                "name": "C",
+                "advertisingChannelType": "SEARCH",
+                "biddingStrategyType": "MANUAL_CPC",
+                **campaign,
+            },
+        }
+    ]
+
+
+def test_create_ad_group(ads):
+    _ad_group_campaign(ads)
+    result = _tool("create_ad_group")(CID, "7", " G ", cpc_bid=2.5)
+    assert ads["mutations"][0]["operations"] == [
+        {
+            "adGroupOperation": {
+                "create": {
+                    "campaign": f"customers/{CID}/campaigns/7",
+                    "name": "G",
+                    "status": "ENABLED",
+                    "type": "SEARCH_STANDARD",
+                    "cpcBidMicros": "2500000",
+                }
+            }
+        }
+    ]
+    assert result["after"] == {"campaign": "C", "name": "G", "status": "ENABLED", "cpc_bid": 2.5}
+    assert result["currency"] == "USD"
+    assert result["warnings"] == []
+
+
+def test_create_ad_group_rules(ads):
+    _ad_group_campaign(ads, biddingStrategyType="MAXIMIZE_CONVERSIONS")
+    assert (
+        "MAXIMIZE_CONVERSIONS" in _tool("create_ad_group")(CID, "7", "G", cpc_bid=1)["warnings"][0]
+    )
+    assert _tool("create_ad_group")(CID, "7", "G")["warnings"] == []
+    assert "cpcBidMicros" not in ads["mutations"][1]["operations"][0]["adGroupOperation"]["create"]
+    _ad_group_campaign(ads, advertisingChannelType="PERFORMANCE_MAX")
+    with pytest.raises(ValueError, match="search campaigns"):
+        _tool("create_ad_group")(CID, "7", "G")
+    with pytest.raises(ValueError, match="name"):
+        _tool("create_ad_group")(CID, "7", " ")
+    with pytest.raises(ValueError, match="amount"):
+        _tool("create_ad_group")(CID, "7", "G", cpc_bid=-1)
+    assert len(ads["mutations"]) == 2
+
+
+def test_create_responsive_search_ad(ads):
+    ads["rows"]["FROM ad_group"] = [
+        {"campaign": {"name": "C"}, "adGroup": {"name": "G", "type": "SEARCH_STANDARD"}}
+    ]
+    result = _tool("create_responsive_search_ad")(
+        CID,
+        "5",
+        [{"text": "H1", "pinned_field": "headline_1"}, "H2", "H3"],
+        ["D1", "D2"],
+        "https://x.com/houston",
+        path1="booth",
+    )
+    headlines = [{"text": "H1", "pinnedField": "HEADLINE_1"}, {"text": "H2"}, {"text": "H3"}]
+    assert ads["mutations"][0]["operations"] == [
+        {
+            "adGroupAdOperation": {
+                "create": {
+                    "adGroup": f"customers/{CID}/adGroups/5",
+                    "status": "ENABLED",
+                    "ad": {
+                        "finalUrls": ["https://x.com/houston"],
+                        "responsiveSearchAd": {
+                            "headlines": headlines,
+                            "descriptions": [{"text": "D1"}, {"text": "D2"}],
+                            "path1": "booth",
+                        },
+                    },
+                }
+            }
+        }
+    ]
+    assert result["after"] == {
+        "campaign": "C",
+        "ad_group": "G",
+        "final_url": "https://x.com/houston",
+        "headlines": headlines,
+        "descriptions": [{"text": "D1"}, {"text": "D2"}],
+        "path1": "booth",
+    }
+
+
+def test_create_responsive_search_ad_rules(ads):
+    tool = _tool("create_responsive_search_ad")
+    texts = (["H1", "H2", "H3"], ["D1", "D2"])
+    with pytest.raises(ValueError, match="final_url"):
+        tool(CID, "5", *texts, "x.com/houston")
+    with pytest.raises(ValueError, match="Invalid ad text"):
+        tool(CID, "5", ["H1", {"pinned_field": "HEADLINE_2"}], ["D1"], "https://x.com")
+    with pytest.raises(ValueError, match="not found"):
+        tool(CID, "5", *texts, "https://x.com")
+    ads["rows"]["FROM ad_group"] = [{"adGroup": {"type": "DISPLAY_STANDARD"}}]
+    with pytest.raises(ValueError, match="standard search"):
+        tool(CID, "5", *texts, "https://x.com")
+    assert not ads["mutations"]

@@ -328,3 +328,50 @@ def test_remove_assets():
     result = _tool("remove_assets")(CID, links)
     _assert_preview(result)
     assert [link["resource_name"] for link in result["before"]] == links
+
+
+@pytest.mark.parametrize(
+    "strategy, targets",
+    [
+        ("MANUAL_CPC", {}),
+        ("MAXIMIZE_CLICKS", {}),
+        ("MAXIMIZE_CONVERSIONS", {"target_cpa": 12.5}),
+        ("MAXIMIZE_CONVERSION_VALUE", {"target_roas": 4.0}),
+    ],
+)
+def test_create_campaign(strategy, targets):
+    result = _tool("create_campaign")(
+        CID,
+        f"mcp validate only {strategy}",
+        10,
+        strategy,
+        language_ids=["1000"],
+        points=[{"latitude": 29.7604, "longitude": -95.3698, "radius": 20}],
+        schedule=[{"day": day, "start_hour": 6, "end_hour": 24} for day in server.DAYS],
+        **targets,
+    )
+    _assert_preview(result)
+    assert result["after"]["status"] == "PAUSED"
+
+
+def test_create_ad_group(campaign):
+    result = _tool("create_ad_group")(
+        CID, campaign["campaign.id"], "mcp validate only test", cpc_bid=1.5
+    )
+    _assert_preview(result)
+
+
+def test_create_responsive_search_ad(keyword):
+    result = _tool("create_responsive_search_ad")(
+        CID,
+        keyword["ad_group.id"],
+        [
+            {"text": "MCP headline one", "pinned_field": "HEADLINE_1"},
+            "MCP headline two",
+            "MCP headline three",
+        ],
+        ["MCP description one.", "MCP description two."],
+        "https://example.com/",
+        path1="test",
+    )
+    _assert_preview(result)

@@ -163,6 +163,21 @@ def _keywords(keywords: list[dict[str, str]]) -> list[dict[str, str]]:
     return result
 
 
+def _scheme(strategy: str, target_cpa: float | None, target_roas: float | None) -> dict[str, Any]:
+    if target_cpa is not None and strategy != "MAXIMIZE_CONVERSIONS":
+        raise ValueError("target_cpa is only valid with MAXIMIZE_CONVERSIONS.")
+    if target_roas is not None and strategy != "MAXIMIZE_CONVERSION_VALUE":
+        raise ValueError("target_roas is only valid with MAXIMIZE_CONVERSION_VALUE.")
+    if target_roas is not None and target_roas <= 0:
+        raise ValueError("target_roas must be positive.")
+    scheme: dict[str, Any] = {}
+    if target_cpa is not None:
+        scheme["targetCpaMicros"] = _micros(target_cpa)
+    if target_roas is not None:
+        scheme["targetRoas"] = target_roas
+    return scheme
+
+
 def _write(
     customer_id: str,
     operations: list[dict[str, Any]],
@@ -443,12 +458,7 @@ def set_bidding_strategy(
     validated and a preview is returned. Call again with confirm=true only after the user
     explicitly approves the preview.
     """
-    if target_cpa is not None and strategy != "MAXIMIZE_CONVERSIONS":
-        raise ValueError("target_cpa is only valid with MAXIMIZE_CONVERSIONS.")
-    if target_roas is not None and strategy != "MAXIMIZE_CONVERSION_VALUE":
-        raise ValueError("target_roas is only valid with MAXIMIZE_CONVERSION_VALUE.")
-    if target_roas is not None and target_roas <= 0:
-        raise ValueError("target_roas must be positive.")
+    scheme = _scheme(strategy, target_cpa, target_roas)
     cid = _cid(customer_id)
     row = _query_one(
         cid,
@@ -469,11 +479,6 @@ def set_bidding_strategy(
         "target_roas": _field(row, "campaign.maximize_conversion_value.target_roas"),
     }
     field, mask = STRATEGIES[strategy]
-    scheme: dict[str, Any] = {}
-    if target_cpa is not None:
-        scheme["targetCpaMicros"] = _micros(target_cpa)
-    if target_roas is not None:
-        scheme["targetRoas"] = target_roas
     after = {
         "campaign": name,
         "strategy": strategy,
@@ -1094,6 +1099,51 @@ def _point(point: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _locations(
+    points: list[dict[str, Any]] | None, location_ids: list[str | int] | None
+) -> list[dict[str, Any]]:
+    criteria = [{"proximity": _point(point)} for point in points or []]
+    criteria += [
+        {"location": {"geoTargetConstant": f"geoTargetConstants/{_id(location, 'location_id')}"}}
+        for location in location_ids or []
+    ]
+    return criteria
+
+
+def _schedule(schedule: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    entries = []
+    for entry in schedule:
+        day = str(entry.get("day", "")).upper()
+        start, end = entry.get("start_hour"), entry.get("end_hour")
+        if (
+            day not in DAYS
+            or not isinstance(start, int)
+            or not isinstance(end, int)
+            or not 0 <= start < end <= 24
+        ):
+            raise ValueError(
+                f"Invalid schedule entry {entry!r}: needs day in {DAYS} and whole hours "
+                "with 0 <= start_hour < end_hour <= 24."
+            )
+        entries.append({"day": day, "start_hour": start, "end_hour": end})
+    return entries
+
+
+def _ad_schedule(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "dayOfWeek": entry["day"],
+        "startHour": entry["start_hour"],
+        "startMinute": "ZERO",
+        "endHour": entry["end_hour"],
+        "endMinute": "ZERO",
+    }
+
+
+def _final_url(final_url: str) -> None:
+    if not re.fullmatch(r"https?://\S+", final_url):
+        raise ValueError(f"Invalid final_url {final_url!r}: must start with http:// or https://.")
+
+
 def _describe_location(criterion: dict[str, Any]) -> dict[str, Any]:
     if "location" in criterion:
         return {"location": criterion["location"]["geoTargetConstant"]}
@@ -1143,11 +1193,7 @@ def set_locations(
         "AND campaign_criterion.type IN (LOCATION, PROXIMITY) "
         "AND campaign_criterion.negative = FALSE AND campaign_criterion.status != 'REMOVED'",
     )
-    new = [{"proximity": _point(point)} for point in points or []]
-    new += [
-        {"location": {"geoTargetConstant": f"geoTargetConstants/{_id(location, 'location_id')}"}}
-        for location in location_ids or []
-    ]
+    new = _locations(points, location_ids)
     operations = [
         {"campaignCriterionOperation": {"remove": c["campaignCriterion"]["resourceName"]}}
         for c in current
@@ -1189,21 +1235,7 @@ def set_ad_schedule(
     a preview is returned. Call again with confirm=true only after the user explicitly
     approves the preview.
     """
-    entries = []
-    for entry in schedule:
-        day = str(entry.get("day", "")).upper()
-        start, end = entry.get("start_hour"), entry.get("end_hour")
-        if (
-            day not in DAYS
-            or not isinstance(start, int)
-            or not isinstance(end, int)
-            or not 0 <= start < end <= 24
-        ):
-            raise ValueError(
-                f"Invalid schedule entry {entry!r}: needs day in {DAYS} and whole hours "
-                "with 0 <= start_hour < end_hour <= 24."
-            )
-        entries.append({"day": day, "start_hour": start, "end_hour": end})
+    entries = _schedule(schedule)
     cid = _cid(customer_id)
     campaign = _id(campaign_id, "campaign_id")
     row = _query_one(
@@ -1233,13 +1265,7 @@ def set_ad_schedule(
             "campaignCriterionOperation": {
                 "create": {
                     "campaign": f"customers/{cid}/campaigns/{campaign}",
-                    "adSchedule": {
-                        "dayOfWeek": entry["day"],
-                        "startHour": entry["start_hour"],
-                        "startMinute": "ZERO",
-                        "endHour": entry["end_hour"],
-                        "endMinute": "ZERO",
-                    },
+                    "adSchedule": _ad_schedule(entry),
                 }
             }
         }
@@ -1278,8 +1304,7 @@ def set_ad_final_url(
     and a preview is returned. Call again with confirm=true only after the user explicitly
     approves the preview.
     """
-    if not re.fullmatch(r"https?://\S+", final_url):
-        raise ValueError(f"Invalid final_url {final_url!r}: must start with http:// or https://.")
+    _final_url(final_url)
     cid = _cid(customer_id)
     ad = _id(ad_id, "ad_id")
     row = _query_one(
@@ -1496,6 +1521,251 @@ def remove_assets(
         before=removed,
         after=None,
         warnings=[f"{len(removed)} asset link(s) will be removed; the assets stay in the account."],
+    )
+
+
+@mcp.tool(annotations=WRITE)
+def create_campaign(
+    customer_id: str | int,
+    name: str,
+    daily_budget: float,
+    strategy: Literal[
+        "MANUAL_CPC", "MAXIMIZE_CLICKS", "MAXIMIZE_CONVERSIONS", "MAXIMIZE_CONVERSION_VALUE"
+    ],
+    target_cpa: float | None = None,
+    target_roas: float | None = None,
+    language_ids: list[str | int] | None = None,
+    points: list[dict[str, Any]] | None = None,
+    location_ids: list[str | int] | None = None,
+    schedule: list[dict[str, Any]] | None = None,
+    search_partners: bool = False,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Create a paused search campaign with its budget, bidding strategy, languages, locations
+    and ad schedule, in one atomic call. Then add ad groups with create_ad_group, keywords with
+    add_keywords and ads with create_responsive_search_ad, and enable it with set_status.
+
+    daily_budget and target_cpa are in the account currency. target_cpa is only valid with
+    MAXIMIZE_CONVERSIONS; target_roas (a ratio: 4.0 means 400%) only with
+    MAXIMIZE_CONVERSION_VALUE. language_ids are Google language ids, found with `search` on
+    language_constant (fields language_constant.id, language_constant.code; 1000 is English,
+    1014 is Portuguese); omitted, the campaign targets all languages. points and location_ids
+    work as in set_locations; omitted, the campaign targets every country. schedule works as in
+    set_ad_schedule; omitted, ads run at all hours. Ads show on Google Search only, plus search
+    partners with search_partners=true. With confirm=true resource_names[1] is the new campaign.
+    With confirm=false (default) the creation is only validated and a preview is returned. Call
+    again with confirm=true only after the user explicitly approves the preview.
+    """
+    if not name.strip():
+        raise ValueError("name must not be empty.")
+    name = name.strip()
+    scheme = _scheme(strategy, target_cpa, target_roas)
+    micros = _micros(daily_budget)
+    languages = [
+        f"languageConstants/{_id(language, 'language_id')}" for language in language_ids or []
+    ]
+    locations = _locations(points, location_ids)
+    entries = _schedule(schedule or [])
+    cid = _cid(customer_id)
+    row = _query_one(
+        cid, "SELECT customer.currency_code, customer.time_zone FROM customer", "customer"
+    )
+    budget_name = f"customers/{cid}/campaignBudgets/-1"
+    campaign_name = f"customers/{cid}/campaigns/-2"
+    criteria = [{"language": {"languageConstant": language}} for language in languages]
+    criteria += locations
+    criteria += [{"adSchedule": _ad_schedule(entry)} for entry in entries]
+    operations: list[dict[str, Any]] = [
+        {
+            "campaignBudgetOperation": {
+                "create": {
+                    "resourceName": budget_name,
+                    "name": name,
+                    "amountMicros": micros,
+                    "explicitlyShared": False,
+                }
+            }
+        },
+        {
+            "campaignOperation": {
+                "create": {
+                    "resourceName": campaign_name,
+                    "name": name,
+                    "status": "PAUSED",
+                    "advertisingChannelType": "SEARCH",
+                    "campaignBudget": budget_name,
+                    "containsEuPoliticalAdvertising": "DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING",
+                    "networkSettings": {
+                        "targetGoogleSearch": True,
+                        "targetSearchNetwork": search_partners,
+                        "targetContentNetwork": False,
+                        "targetPartnerSearchNetwork": False,
+                    },
+                    STRATEGIES[strategy][0]: scheme,
+                }
+            }
+        },
+    ]
+    operations += [
+        {"campaignCriterionOperation": {"create": {"campaign": campaign_name, **criterion}}}
+        for criterion in criteria
+    ]
+    warnings = [] if locations else ["No locations given: the campaign targets every country."]
+    return _write(
+        cid,
+        operations,
+        confirm,
+        before=None,
+        after={
+            "name": name,
+            "status": "PAUSED",
+            "daily_budget": _money(micros),
+            "strategy": strategy,
+            "target_cpa": _money(scheme.get("targetCpaMicros")),
+            "target_roas": target_roas,
+            "search_partners": search_partners,
+            "languages": languages,
+            "locations": [_describe_location(criterion) for criterion in locations],
+            "time_zone": _field(row, "customer.time_zone"),
+            "schedule": entries,
+        },
+        currency=_field(row, "customer.currency_code"),
+        warnings=warnings,
+    )
+
+
+@mcp.tool(annotations=WRITE)
+def create_ad_group(
+    customer_id: str | int,
+    campaign_id: str | int,
+    name: str,
+    cpc_bid: float | None = None,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Create an enabled ad group in a search campaign.
+
+    cpc_bid is the max CPC in the account currency, never in micros. It only takes effect under
+    the MANUAL_CPC strategy; a warning is returned otherwise. With confirm=true
+    resource_names[0] is the new ad group. With confirm=false (default) the creation is only
+    validated and a preview is returned. Call again with confirm=true only after the user
+    explicitly approves the preview.
+    """
+    if not name.strip():
+        raise ValueError("name must not be empty.")
+    name = name.strip()
+    micros = None if cpc_bid is None else _micros(cpc_bid)
+    cid = _cid(customer_id)
+    campaign = _id(campaign_id, "campaign_id")
+    row = _query_one(
+        cid,
+        "SELECT campaign.name, campaign.advertising_channel_type, "
+        "campaign.bidding_strategy_type, customer.currency_code FROM campaign "
+        f"WHERE campaign.id = {campaign}",
+        "campaign",
+    )
+    if _field(row, "campaign.advertising_channel_type") != "SEARCH":
+        raise ValueError("Ad groups can only be created in search campaigns.")
+    strategy = _field(row, "campaign.bidding_strategy_type")
+    warnings = []
+    if micros and strategy != "MANUAL_CPC":
+        warnings.append(f"The campaign strategy is {strategy}, so this bid is likely ignored.")
+    group = {
+        "campaign": f"customers/{cid}/campaigns/{campaign}",
+        "name": name,
+        "status": "ENABLED",
+        "type": "SEARCH_STANDARD",
+    }
+    if micros:
+        group["cpcBidMicros"] = micros
+    return _write(
+        cid,
+        [{"adGroupOperation": {"create": group}}],
+        confirm,
+        before=None,
+        after={
+            "campaign": _field(row, "campaign.name"),
+            "name": name,
+            "status": "ENABLED",
+            "cpc_bid": _money(micros),
+        },
+        currency=_field(row, "customer.currency_code"),
+        warnings=warnings,
+    )
+
+
+def _ad_text(item: str | dict[str, str]) -> dict[str, str]:
+    if isinstance(item, str):
+        item = {"text": item}
+    if not str(item.get("text", "")).strip():
+        raise ValueError(f"Invalid ad text {item!r}: needs text.")
+    text = {"text": item["text"]}
+    if item.get("pinned_field"):
+        text["pinnedField"] = str(item["pinned_field"]).upper()
+    return text
+
+
+@mcp.tool(annotations=WRITE)
+def create_responsive_search_ad(
+    customer_id: str | int,
+    ad_group_id: str | int,
+    headlines: list[str | dict[str, str]],
+    descriptions: list[str | dict[str, str]],
+    final_url: str,
+    path1: str | None = None,
+    path2: str | None = None,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Create an enabled responsive search ad in an ad group.
+
+    headlines (3 to 15, up to 30 characters each) and descriptions (2 to 4, up to 90 characters
+    each) are strings, or {"text": "...", "pinned_field": "HEADLINE_1"} to pin one to a position
+    (HEADLINE_1..3, DESCRIPTION_1..2). path1 and path2 (up to 15 characters each) are the
+    display URL paths. The ad goes through Google's policy review before serving. With
+    confirm=true resource_names[0] is the new ad (customers/<id>/adGroupAds/<ad_group>~<ad>).
+    With confirm=false (default) the creation is only validated and a preview is returned. Call
+    again with confirm=true only after the user explicitly approves the preview.
+    """
+    _final_url(final_url)
+    titles = [_ad_text(headline) for headline in headlines]
+    texts = [_ad_text(description) for description in descriptions]
+    cid = _cid(customer_id)
+    ad_group = _id(ad_group_id, "ad_group_id")
+    row = _query_one(
+        cid,
+        "SELECT campaign.name, ad_group.name, ad_group.type FROM ad_group "
+        f"WHERE ad_group.id = {ad_group}",
+        "ad_group",
+    )
+    if _field(row, "ad_group.type") != "SEARCH_STANDARD":
+        raise ValueError("Responsive search ads need a standard search ad group.")
+    paths = {key: value for key, value in (("path1", path1), ("path2", path2)) if value}
+    ad = {
+        "finalUrls": [final_url],
+        "responsiveSearchAd": {"headlines": titles, "descriptions": texts, **paths},
+    }
+    return _write(
+        cid,
+        [
+            {
+                "adGroupAdOperation": {
+                    "create": {
+                        "adGroup": f"customers/{cid}/adGroups/{ad_group}",
+                        "status": "ENABLED",
+                        "ad": ad,
+                    }
+                }
+            }
+        ],
+        confirm,
+        before=None,
+        after={
+            "campaign": _field(row, "campaign.name"),
+            "ad_group": _field(row, "ad_group.name"),
+            "final_url": final_url,
+            "headlines": titles,
+            "descriptions": texts,
+            **paths,
+        },
     )
 
 
